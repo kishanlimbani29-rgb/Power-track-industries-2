@@ -1,0 +1,176 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User account profile and role information",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Unique user ID" },
+        "email": { "type": "string", "description": "User email address" },
+        "displayName": { "type": "string", "description": "User display name" },
+        "role": { "type": "string", "enum": ["admin", "manager", "staff", "viewer"], "description": "User role permissions" },
+        "status": { "type": "string", "enum": ["active", "suspended", "pending"], "description": "Account status" },
+        "photoURL": { "type": "string", "description": "Profile photo URL" },
+        "createdAt": { "type": "string", "description": "ISO timestamp of account creation" },
+        "updatedAt": { "type": "string", "description": "ISO timestamp of last profile update" }
+      },
+      "required": ["uid", "email", "role"]
+    },
+    "Invite": {
+      "title": "Invite",
+      "description": "Pre-authorized user invitations by email with assigned role",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Invite ID or lowercase email" },
+        "email": { "type": "string", "description": "Target email" },
+        "role": { "type": "string", "description": "Assigned role" },
+        "invitedBy": { "type": "string", "description": "Admin UID who created the invite" },
+        "invitedByName": { "type": "string", "description": "Admin name who created the invite" },
+        "createdAt": { "type": "string", "description": "Creation timestamp" }
+      },
+      "required": ["email", "role", "invitedBy"]
+    },
+    "AuditRequest": {
+      "title": "AuditRequest",
+      "description": "Verification queue for production, dispatch, and raw intake requests",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Audit request ID" },
+        "type": { "type": "string", "description": "Request type: production, dispatch, or raw_material_in" },
+        "title": { "type": "string", "description": "Short title" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"], "description": "Status of request" },
+        "submittedBy": { "type": "string", "description": "Display name of requester" },
+        "submittedAt": { "type": "string", "description": "Submission ISO timestamp" }
+      },
+      "required": ["id", "type", "status", "submittedBy", "submittedAt"]
+    },
+    "InventoryItem": {
+      "title": "InventoryItem",
+      "description": "Inventory stock items including raw materials and finished goods",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Item ID" },
+        "name": { "type": "string", "maxLength": 120, "description": "Name of the inventory item" },
+        "sku": { "type": "string", "maxLength": 50, "description": "Stock Keeping Unit or barcode" },
+        "type": { "type": "string", "enum": ["raw_material", "semi_finished", "finished_good", "both"], "description": "Type of inventory item: raw_material, semi_finished, finished_good" },
+        "category": { "type": "string", "maxLength": 60, "description": "Category or department e.g. Raw Material, Semi Finished, Finished Goods" },
+        "unit": { "type": "string", "maxLength": 20, "description": "Unit of measure e.g. kg, g, l, pcs" },
+        "quantity": { "type": "number", "description": "Current quantity in stock" },
+        "minStock": { "type": "number", "description": "Reorder alert threshold" },
+        "unitCost": { "type": "number", "description": "Purchase or production cost per unit" },
+        "sellingPrice": { "type": "number", "description": "Retail selling price for finished goods" },
+        "supplier": { "type": "string", "maxLength": 100, "description": "Primary supplier name" },
+        "location": { "type": "string", "maxLength": 60, "description": "Storage warehouse, aisle or shelf" },
+        "notes": { "type": "string", "maxLength": 500, "description": "Additional notes" },
+        "createdAt": { "type": "string", "description": "Creation timestamp" },
+        "updatedAt": { "type": "string", "description": "Last update timestamp" },
+        "lastUpdatedBy": { "type": "string", "description": "User ID of modifier" }
+      },
+      "required": ["id", "name", "type", "unit", "quantity", "unitCost"]
+    },
+    "Recipe": {
+      "title": "Recipe",
+      "description": "Recipe or Bill of Materials (BOM) linking raw materials to a finished product",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Recipe ID" },
+        "name": { "type": "string", "maxLength": 120, "description": "Recipe name" },
+        "finishedItemId": { "type": "string", "description": "Target finished good inventory item ID" },
+        "finishedItemName": { "type": "string", "description": "Name of target item" },
+        "yieldQuantity": { "type": "number", "description": "Units produced per batch" },
+        "laborCost": { "type": "number", "description": "Estimated labor/overhead cost per batch" },
+        "instructions": { "type": "string", "maxLength": 1000, "description": "Preparation or assembly instructions" },
+        "ingredients": { "type": "array", "description": "List of required raw materials and quantities" },
+        "createdAt": { "type": "string", "description": "Creation timestamp" },
+        "updatedAt": { "type": "string", "description": "Last update timestamp" },
+        "createdBy": { "type": "string", "description": "Creator user ID" }
+      },
+      "required": ["id", "name", "finishedItemId", "yieldQuantity", "ingredients"]
+    },
+    "StockMovement": {
+      "title": "StockMovement",
+      "description": "Audit log of every inventory adjustment, restock, sale, or recipe consumption",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Movement ID" },
+        "itemId": { "type": "string", "description": "Inventory item ID" },
+        "itemName": { "type": "string", "description": "Inventory item name" },
+        "type": { "type": "string", "enum": ["in", "out", "production_consume", "production_yield", "adjustment", "waste"], "description": "Movement type" },
+        "quantity": { "type": "number", "description": "Quantity change delta" },
+        "previousQuantity": { "type": "number", "description": "Quantity prior to change" },
+        "newQuantity": { "type": "number", "description": "Quantity after change" },
+        "reason": { "type": "string", "maxLength": 200, "description": "Reason for movement or reference note" },
+        "referenceId": { "type": "string", "description": "Associated batch or invoice ID" },
+        "performedBy": { "type": "string", "description": "User ID of actor" },
+        "performedByName": { "type": "string", "description": "Display name of actor" },
+        "timestamp": { "type": "string", "description": "Time of movement" }
+      },
+      "required": ["id", "itemId", "type", "quantity", "timestamp"]
+    },
+    "ProductionBatch": {
+      "title": "ProductionBatch",
+      "description": "Log of executed recipe production batches",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Batch execution ID" },
+        "recipeId": { "type": "string", "description": "Recipe ID used" },
+        "recipeName": { "type": "string", "description": "Name of recipe" },
+        "finishedItemId": { "type": "string", "description": "Output inventory item ID" },
+        "finishedItemName": { "type": "string", "description": "Output item name" },
+        "batchMultiplier": { "type": "number", "description": "Multiplier of standard batch yield" },
+        "quantityProduced": { "type": "number", "description": "Total finished items produced" },
+        "totalBatchCost": { "type": "number", "description": "Total cost of raw materials and labor used" },
+        "rawMaterialsDeducted": { "type": "array", "description": "Summary of raw materials deducted" },
+        "notes": { "type": "string", "maxLength": 500, "description": "Operator notes" },
+        "performedBy": { "type": "string", "description": "User ID of operator" },
+        "performedByName": { "type": "string", "description": "Display name of operator" },
+        "timestamp": { "type": "string", "description": "Production completion timestamp" }
+      },
+      "required": ["id", "recipeId", "finishedItemId", "quantityProduced", "timestamp"]
+    },
+    "RoleSettings": {
+      "title": "RoleSettings",
+      "description": "Dynamic role permissions and custom role configurations",
+      "type": "object",
+      "properties": {
+        "permissions": { "type": "object", "description": "Map of role key to capability permissions" },
+        "customRoles": { "type": "array", "description": "List of custom defined roles" },
+        "updatedAt": { "type": "string", "description": "ISO timestamp of last configuration update" }
+      }
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "User role and profile directory"
+    },
+    "/items/{itemId}": {
+      "schema": { "$ref": "#/entities/InventoryItem" },
+      "description": "Master inventory catalog of raw materials and finished goods"
+    },
+    "/recipes/{recipeId}": {
+      "schema": { "$ref": "#/entities/Recipe" },
+      "description": "Formulas and bills of materials"
+    },
+    "/movements/{movementId}": {
+      "schema": { "$ref": "#/entities/StockMovement" },
+      "description": "Audit log of all stock movements across devices"
+    },
+    "/batches/{batchId}": {
+      "schema": { "$ref": "#/entities/ProductionBatch" },
+      "description": "Historical log of recipe production runs"
+    },
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/RoleSettings" },
+      "description": "Application settings including role permissions and custom roles"
+    },
+    "/invites/{inviteId}": {
+      "schema": { "$ref": "#/entities/Invite" },
+      "description": "Team invitation records mapped by email"
+    },
+    "/audit_requests/{requestId}": {
+      "schema": { "$ref": "#/entities/AuditRequest" },
+      "description": "Audit requests queue for stock and production governance"
+    }
+  }
+}

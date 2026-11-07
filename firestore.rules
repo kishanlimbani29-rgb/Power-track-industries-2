@@ -1,0 +1,403 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global default deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 256 && id.matches('^[a-zA-Z0-9_\\-\\.\\+@]+$');
+    }
+
+    function isOwnerEmail() {
+      return isSignedIn() &&
+        request.auth.token.email != null &&
+        request.auth.token.email.lower() == 'kishanlimbani29@gmail.com' &&
+        request.auth.token.email_verified == true;
+    }
+
+    function isUserDocExists() {
+      return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isProfileActive() {
+      return isSignedIn() &&
+        request.auth.token.email_verified == true &&
+        isUserDocExists() &&
+        getUserData().get('status', '') == 'active';
+    }
+
+    function isAdmin() {
+      return isOwnerEmail() || (
+        isProfileActive() && getUserData().get('role', '') == 'admin'
+      );
+    }
+
+    function getUserRole() {
+      return getUserData().get('role', '');
+    }
+
+    function hasSettingsDoc() {
+      return exists(/databases/$(database)/documents/settings/roles_permissions);
+    }
+
+    function getSettingsData() {
+      return get(/databases/$(database)/documents/settings/roles_permissions).data;
+    }
+
+    function getRolePerms() {
+      return hasSettingsDoc() ?
+        getSettingsData().get('permissions', {}).get(getUserRole(), {}) :
+        {};
+    }
+
+    function canAdjustStock() {
+      return isAdmin() || (
+        isProfileActive() && (
+          hasSettingsDoc() ?
+            getRolePerms().get('canAdjustStock', false) == true :
+            getUserRole() in ['manager', 'staff']
+        )
+      );
+    }
+
+    function canProduceBatch() {
+      return isAdmin() || (
+        isProfileActive() && (
+          hasSettingsDoc() ?
+            getRolePerms().get('canProduceBatch', false) == true :
+            getUserRole() in ['manager', 'staff']
+        )
+      );
+    }
+
+    function canEditItems() {
+      return isAdmin() || (
+        isProfileActive() && (
+          hasSettingsDoc() ?
+            getRolePerms().get('canEditItems', false) == true :
+            getUserRole() == 'manager'
+        )
+      );
+    }
+
+    function canDeleteItems() {
+      return isAdmin() || (
+        isProfileActive() && (
+          hasSettingsDoc() ?
+            getRolePerms().get('canDeleteItems', false) == true :
+            getUserRole() == 'manager'
+        )
+      );
+    }
+
+    function canEditRecipes() {
+      return isAdmin() || (
+        isProfileActive() && (
+          hasSettingsDoc() ?
+            getRolePerms().get('canEditRecipes', false) == true :
+            getUserRole() == 'manager'
+        )
+      );
+    }
+
+    function canDeleteRecipes() {
+      return isAdmin() || (
+        isProfileActive() && (
+          hasSettingsDoc() ?
+            getRolePerms().get('canDeleteRecipes', false) == true :
+            getUserRole() == 'manager'
+        )
+      );
+    }
+
+    function canAuditRequests() {
+      return isAdmin() || (
+        isProfileActive() && (
+          hasSettingsDoc() ?
+            getRolePerms().get('canAuditRequests', false) == true :
+            getUserRole() == 'manager'
+        )
+      );
+    }
+
+
+    // ---------- Sales & Purchase permission helpers ----------
+    // A switch missing from settings/roles_permissions falls back to the role's default.
+    function hasPerm(key, defaultRoles) {
+      return isAdmin() || (
+        isProfileActive() && (
+          hasSettingsDoc() ?
+            getRolePerms().get(key, getUserRole() in defaultRoles) == true :
+            getUserRole() in defaultRoles
+        )
+      );
+    }
+
+    function canViewSales() { return hasPerm('canViewSalesOption', ['manager']); }
+    function canCreateSales() { return hasPerm('canCreateSales', ['manager']); }
+    function canEditSales() { return hasPerm('canEditSales', ['manager']); }
+    function canDeleteSales() { return hasPerm('canDeleteSales', ['manager']); }
+    function canRecordPayments() { return hasPerm('canRecordPayments', ['manager']); }
+    function canCreateSalesReturn() { return hasPerm('canCreateSalesReturn', ['manager']); }
+    function canEditSalesReturn() { return hasPerm('canEditSalesReturn', ['manager']); }
+    function canDeleteSalesReturn() { return hasPerm('canDeleteSalesReturn', ['manager']); }
+    function canViewPurchase() { return hasPerm('canViewPurchaseOption', ['manager', 'staff']); }
+    function canCreatePurchase() { return hasPerm('canCreatePurchase', ['manager']); }
+    function canEditPurchase() { return hasPerm('canEditPurchase', ['manager']); }
+    function canDeletePurchase() { return hasPerm('canDeletePurchase', ['manager']); }
+    function canReceivePurchase() { return hasPerm('canReceivePurchase', ['manager', 'staff']); }
+    function canRecordPurchasePayments() { return hasPerm('canRecordPurchasePayments', ['manager']); }
+    function canCreatePurchaseReturn() { return hasPerm('canCreatePurchaseReturn', ['manager']); }
+    function canEditPurchaseReturn() { return hasPerm('canEditPurchaseReturn', ['manager']); }
+    function canDeletePurchaseReturn() { return hasPerm('canDeletePurchaseReturn', ['manager']); }
+
+    function canMoveStockForTrade() {
+      return canCreateSales() || canEditSales() || canDeleteSales() || canCreateSalesReturn() || canEditSalesReturn() || canDeleteSalesReturn() || canReceivePurchase() || canEditPurchase() || canDeletePurchase() || canCreatePurchaseReturn() || canEditPurchaseReturn() || canDeletePurchaseReturn();
+    }
+
+    function onlyChanges(keys) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(keys);
+    }
+
+    // 1. User profiles & directory
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && (
+        request.auth.uid == userId || isAdmin()
+      );
+      allow list: if isAdmin();
+
+      allow create: if isSignedIn() && isValidId(userId) && request.auth.uid == userId && (
+        (isOwnerEmail() && request.resource.data.get('role', '') == 'admin' && request.resource.data.get('status', '') == 'active') ||
+        (
+          request.auth.token.email != null &&
+          exists(/databases/$(database)/documents/invites/$(request.auth.token.email.lower())) &&
+          request.resource.data.get('status', '') == 'active' &&
+          request.resource.data.get('role', '') != 'admin' &&
+          request.resource.data.get('role', '') == get(/databases/$(database)/documents/invites/$(request.auth.token.email.lower())).data.get('role', '')
+        ) ||
+        (request.resource.data.get('status', '') == 'pending' && request.resource.data.get('role', '') != 'admin')
+      );
+
+      allow update: if isSignedIn() && isValidId(userId) && (
+        isAdmin() || (
+          request.auth.uid == userId &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'photoURL', 'updatedAt'])
+        )
+      );
+
+      allow delete: if isAdmin() && isValidId(userId) && userId != request.auth.uid;
+    }
+
+    // 2. Pre-authorized team invitations
+    match /invites/{inviteId} {
+      allow get: if isSignedIn() && isValidId(inviteId) && (
+        isAdmin() || (
+          request.auth.token.email != null &&
+          request.auth.token.email.lower() == inviteId.lower()
+        )
+      );
+      allow list: if isAdmin();
+      allow create, update: if isAdmin() && isValidId(inviteId);
+      allow delete: if isValidId(inviteId) && (
+        isAdmin() || (
+          isSignedIn() &&
+          request.auth.token.email != null &&
+          request.auth.token.email.lower() == inviteId.lower()
+        )
+      );
+    }
+
+    // 3. Inventory items
+    match /items/{itemId} {
+      allow get: if (isProfileActive() || isAdmin()) && isValidId(itemId);
+      allow list: if (isProfileActive() || isAdmin());
+      allow create: if (canEditItems() || canAuditRequests()) && isValidId(itemId);
+      allow delete: if canDeleteItems() && isValidId(itemId);
+      allow update: if isValidId(itemId) && (
+        canEditItems() || (
+          (canEditItems() || canAuditRequests()) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['quantity', 'unitCost', 'location', 'updatedAt', 'lastUpdatedBy', 'lastMovementReason', 'lastMovementType'])
+        ) || (
+          (canAdjustStock() || canProduceBatch() || canAuditRequests() || canMoveStockForTrade()) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['quantity', 'updatedAt', 'lastUpdatedBy', 'lastMovementReason', 'lastMovementType'])
+        ) || (
+          canReceivePurchase() &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['quantity', 'unitCost', 'updatedAt', 'lastUpdatedBy', 'lastMovementReason', 'lastMovementType'])
+        )
+      );
+    }
+
+    // 4. Recipes (Bill of Materials)
+    match /recipes/{recipeId} {
+      allow get: if (isProfileActive() || isAdmin()) && isValidId(recipeId);
+      allow list: if (isProfileActive() || isAdmin());
+      allow create, update: if canEditRecipes() && isValidId(recipeId);
+      allow delete: if canDeleteRecipes() && isValidId(recipeId);
+    }
+
+    // 5. Stock movements ledger - Append-only immutable log
+    match /movements/{movementId} {
+      allow get: if (isProfileActive() || isAdmin()) && isValidId(movementId);
+      allow list: if (isProfileActive() || isAdmin());
+      allow create: if (canAdjustStock() || canProduceBatch() || canEditItems() || canAuditRequests() || canMoveStockForTrade()) &&
+        isValidId(movementId) &&
+        request.resource.data.get('performedBy', '') == request.auth.uid;
+      allow update, delete: if false; // Strict immutable audit ledger
+    }
+
+    // 6. Production batches ledger - Append-only with authorized voiding only
+    match /batches/{batchId} {
+      allow get: if (isProfileActive() || isAdmin()) && isValidId(batchId);
+      allow list: if (isProfileActive() || isAdmin());
+      allow create: if canProduceBatch() && isValidId(batchId);
+      allow update: if canAuditRequests() && isValidId(batchId) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isVoid', 'voidedAt', 'voidedBy', 'voidedByName', 'voidReason']) &&
+        resource.data.get('isVoid', false) != true &&
+        request.resource.data.isVoid == true;
+      allow delete: if false; // Production records are permanent
+    }
+
+    // 7. System settings & RBAC configuration
+    match /settings/{settingId} {
+      allow get: if (isProfileActive() || isAdmin()) && isValidId(settingId);
+      allow list: if (isProfileActive() || isAdmin());
+      allow write: if isAdmin() && isValidId(settingId);
+    }
+
+    // 8. Audit requests & governance workflow
+    match /audit_requests/{requestId} {
+      allow get: if (isProfileActive() || isAdmin()) && isValidId(requestId);
+      allow list: if (isProfileActive() || isAdmin());
+      allow create: if (isProfileActive() || isAdmin()) && isValidId(requestId);
+      allow update: if canAuditRequests() && isValidId(requestId);
+      allow delete: if isAdmin() && isValidId(requestId);
+    }
+      // 9. Sequential numbers (INV / SR / PO / PR) - can only go up by one
+    match /counters/{counterId} {
+      allow get: if (isProfileActive() || isAdmin()) && isValidId(counterId);
+      allow list: if false;
+      allow create: if (canCreateSales() || canCreateSalesReturn() || canCreatePurchase() || canCreatePurchaseReturn()) &&
+        isValidId(counterId) &&
+        request.resource.data.keys().hasOnly(['value', 'updatedAt']) &&
+        request.resource.data.value == 1;
+      allow update: if (canCreateSales() || canCreateSalesReturn() || canCreatePurchase() || canCreatePurchaseReturn()) &&
+        isValidId(counterId) &&
+        onlyChanges(['value', 'updatedAt']) &&
+        request.resource.data.value == resource.data.value + 1;
+      allow delete: if false;
+    }
+
+    // 10. Sales invoices - never deleted
+    match /sales/{saleId} {
+      allow get: if canViewSales() && isValidId(saleId);
+      allow list: if canViewSales();
+      allow create: if canCreateSales() && isValidId(saleId) &&
+        request.resource.data.createdBy == request.auth.uid &&
+        request.resource.data.status == 'confirmed' &&
+        request.resource.data.amountPaid == 0 &&
+        request.resource.data.returnsTotal == 0;
+      allow update: if isValidId(saleId) && (
+        // Edit sale by authorized user
+        (
+          canEditSales() && resource.data.status in ['confirmed', 'dispatched'] &&
+          onlyChanges(['customer', 'lines', 'subtotal', 'gstTotal', 'grandTotal', 'vehicleNumber', 'trackingNumber', 'notes', 'updatedAt'])
+        ) ||
+        // Status: confirmed -> dispatched/delivered/cancelled, dispatched -> delivered/cancelled
+        (
+          canCreateSales() &&
+          onlyChanges(['status', 'dispatchedAt', 'deliveredAt', 'cancelledAt', 'cancelledBy', 'cancelReason', 'paymentStatus', 'updatedAt']) &&
+          (
+            (resource.data.status == 'confirmed' && request.resource.data.status in ['dispatched', 'delivered', 'cancelled']) ||
+            (resource.data.status == 'dispatched' && request.resource.data.status in ['delivered', 'cancelled'])
+          ) &&
+          (request.resource.data.status != 'cancelled' || (resource.data.amountPaid == 0 && resource.data.returnsTotal == 0))
+        ) ||
+        // Payments and refunds
+        (
+          canRecordPayments() && resource.data.status != 'cancelled' &&
+          onlyChanges(['payments', 'amountPaid', 'refunds', 'refundedTotal', 'paymentStatus', 'updatedAt'])
+        ) ||
+        // Returns (credit notes)
+        (
+          (canCreateSalesReturn() || canEditSalesReturn() || canDeleteSalesReturn()) && resource.data.status in ['dispatched', 'delivered'] &&
+          onlyChanges(['returnedQty', 'returnsTotal', 'returnStatus', 'paymentStatus', 'updatedAt'])
+        )
+      );
+      allow delete: if isValidId(saleId) && canDeleteSales();
+    }
+
+    // 11. Sales returns (credit notes)
+    match /sales_returns/{returnId} {
+      allow get: if canViewSales() && isValidId(returnId);
+      allow list: if canViewSales();
+      allow create: if canCreateSalesReturn() && isValidId(returnId) &&
+        request.resource.data.createdBy == request.auth.uid;
+      allow update: if isValidId(returnId) && canEditSalesReturn();
+      allow delete: if isValidId(returnId) && canDeleteSalesReturn();
+    }
+
+    // 12. Purchase orders
+    match /purchases/{purchaseId} {
+      allow get: if (canViewPurchase() || canReceivePurchase()) && isValidId(purchaseId);
+      allow list: if canViewPurchase() || canReceivePurchase();
+      allow create: if canCreatePurchase() && isValidId(purchaseId) &&
+        request.resource.data.createdBy == request.auth.uid &&
+        request.resource.data.status == 'ordered' &&
+        request.resource.data.amountPaid == 0;
+      allow update: if isValidId(purchaseId) && (
+        // Edit purchase order by authorized user
+        (
+          canEditPurchase() && resource.data.status == 'ordered' &&
+          resource.data.receipts.size() == 0 &&
+          onlyChanges(['supplier', 'lines', 'subtotal', 'gstTotal', 'grandTotal', 'expectedDate', 'notes', 'updatedAt'])
+        ) ||
+        // Cancel: only while nothing has been received
+        (
+          canCreatePurchase() && resource.data.status == 'ordered' &&
+          request.resource.data.status == 'cancelled' &&
+          resource.data.receipts.size() == 0 && resource.data.amountPaid == 0 &&
+          onlyChanges(['status', 'cancelledAt', 'cancelledBy', 'cancelReason', 'paymentStatus', 'updatedAt'])
+        ) ||
+        // Receive goods
+        (
+          canReceivePurchase() && resource.data.status in ['ordered', 'partly_received'] &&
+          request.resource.data.status in ['partly_received', 'received'] &&
+          request.resource.data.receipts.size() == resource.data.receipts.size() + 1 &&
+          onlyChanges(['receivedQty', 'receipts', 'status', 'paymentStatus', 'updatedAt'])
+        ) ||
+        // Payments and refunds
+        (
+          canRecordPurchasePayments() && resource.data.status != 'cancelled' &&
+          onlyChanges(['payments', 'amountPaid', 'refunds', 'refundedTotal', 'paymentStatus', 'updatedAt'])
+        ) ||
+        // Returns (debit notes)
+        (
+          (canCreatePurchaseReturn() || canEditPurchaseReturn() || canDeletePurchaseReturn()) && resource.data.status in ['partly_received', 'received'] &&
+          onlyChanges(['returnedQty', 'returnsTotal', 'returnStatus', 'paymentStatus', 'updatedAt'])
+        )
+      );
+      allow delete: if isValidId(purchaseId) && canDeletePurchase();
+    }
+
+    // 13. Purchase returns (debit notes)
+    match /purchase_returns/{returnId} {
+      allow get: if canViewPurchase() && isValidId(returnId);
+      allow list: if canViewPurchase();
+      allow create: if canCreatePurchaseReturn() && isValidId(returnId) &&
+        request.resource.data.createdBy == request.auth.uid;
+      allow update: if isValidId(returnId) && canEditPurchaseReturn();
+      allow delete: if isValidId(returnId) && canDeletePurchaseReturn();
+    }
+  }
+}

@@ -1,0 +1,6 @@
+Item Name,SKU / Code,Classification,Unit of Measure,Current Stock,Min Stock Alert,Unit Cost ($),Selling Price ($),Supplier / Vendor,Shelf / Location,Notes
+Refined Lead Ingot 99.97%,RAW-LED-001,Raw Material,kg,500,100,2.15,0,National Smelting Corp,Bay 1 - Heavy Storage,High purity bullion grade lead for plate casting
+Lead Oxide Powder (Grey Oxide),RAW-OXI-002,Raw Material,kg,250,50,2.8,0,Apex Chemical Minerals,Dry Silo 2,70-80% lead monoxide (PbO) / free lead
+Positive Lead Plate 12V Sub-Assembly,SMF-PLT-003,Semi Finished,pcs,120,30,3.4,0,In-House Foundry,Curing Chamber 1,Pasted and cured grid plates ready for formation
+12V 100Ah Deep Cycle Power Battery,FIN-BAT-004,Finished Good,pcs,45,15,48.5,115,Power Track Manufacturing,Finished Goods Rack A,Complete assembly with sealed casing and terminals
+Dual Terminal Brass Connector,ITM-TRM-005,Composite,pcs,300,50,1.2,3.5,Precision Hardware Inc,Bin 14-C,Can be sold as replacement part or consumed in assembly
