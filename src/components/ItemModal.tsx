@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { X, Sparkles, AlertCircle, ChevronDown, Lock } from 'lucide-react';
+import { X, Sparkles, AlertCircle, ChevronDown, Lock, Camera, Image as ImageIcon, Loader2 } from 'lucide-react';
 import { InventoryItem, ItemType } from '../types/inventory';
 import { useInventory } from '../context/InventoryContext';
 import { useAuth } from '../context/AuthContext';
 import { formatFirestoreError } from '../firebase/config';
+import { resizeProductPhoto } from '../utils/photoResizer';
 
 interface ItemModalProps {
   isOpen: boolean;
@@ -18,7 +19,7 @@ export const ItemModal: React.FC<ItemModalProps> = ({
   itemToEdit,
   onOpenAdjustStock,
 }) => {
-  const { addItem, updateItem, items } = useInventory();
+  const { addItem, updateItem, saveItemPhoto, removeItemPhoto, items } = useInventory();
   const { permissions } = useAuth();
 
   const [name, setName] = useState('');
@@ -34,6 +35,17 @@ export const ItemModal: React.FC<ItemModalProps> = ({
   const [notes, setNotes] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Photo state
+  const [photoThumb, setPhotoThumb] = useState<string | null>(null);
+  const [pendingFullPhoto, setPendingFullPhoto] = useState<string | null>(null);
+  const [pendingThumbPhoto, setPendingThumbPhoto] = useState<string | null>(null);
+  const [isPhotoRemoved, setIsPhotoRemoved] = useState<boolean>(false);
+  const [isProcessingPhoto, setIsProcessingPhoto] = useState<boolean>(false);
+  const [savingPhotoText, setSavingPhotoText] = useState<string | null>(null);
+
+  const cameraInputRef = useRef<HTMLInputElement>(null);
+  const galleryInputRef = useRef<HTMLInputElement>(null);
 
   // Track initialization so updates from another phone DO NOT reset or wipe a half-filled form
   const wasOpenRef = useRef<boolean>(false);
@@ -76,6 +88,10 @@ export const ItemModal: React.FC<ItemModalProps> = ({
         setSupplier(itemToEdit.supplier || '');
         setLocation(itemToEdit.location || '');
         setNotes(itemToEdit.notes || '');
+        setPhotoThumb(itemToEdit.photoThumb || null);
+        setPendingFullPhoto(null);
+        setPendingThumbPhoto(null);
+        setIsPhotoRemoved(false);
       } else {
         setName('');
         const rand = Math.floor(1000 + Math.random() * 9000);
@@ -89,7 +105,12 @@ export const ItemModal: React.FC<ItemModalProps> = ({
         setSupplier('');
         setLocation('');
         setNotes('');
+        setPhotoThumb(null);
+        setPendingFullPhoto(null);
+        setPendingThumbPhoto(null);
+        setIsPhotoRemoved(false);
       }
+      setSavingPhotoText(null);
       setError(null);
     }
   }, [isOpen, itemToEdit?.id]);
@@ -138,51 +159,121 @@ export const ItemModal: React.FC<ItemModalProps> = ({
     const parsedMinStock = minStock === '' ? 0 : Math.max(0, Number(minStock) || 0);
     const parsedQuantity = quantity === '' ? 0 : Math.max(0, Number(quantity) || 0);
 
+    if (pendingFullPhoto || isPhotoRemoved) {
+      setSavingPhotoText('Saving photo...');
+    }
+
     try {
       if (itemToEdit) {
-        // Editing existing item: DO NOT overwrite stock quantity here!
-        await updateItem(itemToEdit.id, {
-          name: name.trim(),
-          sku: sku.trim().toUpperCase(),
-          type,
-          unit,
-          minStock: parsedMinStock,
-          unitCost: permissions.canViewCostPerUnit ? parsedCost : itemToEdit.unitCost,
-          sellingPrice: parsedSelling,
-          supplier: supplier.trim(),
-          location: location.trim(),
-          notes: notes.trim(),
-        });
+        // Handle photo changes on existing item
+        if (isPhotoRemoved) {
+          await removeItemPhoto(itemToEdit.id);
+          await updateItem(itemToEdit.id, {
+            name: name.trim(),
+            sku: sku.trim().toUpperCase(),
+            type,
+            unit,
+            minStock: parsedMinStock,
+            unitCost: permissions.canViewCostPerUnit ? parsedCost : itemToEdit.unitCost,
+            sellingPrice: parsedSelling,
+            supplier: supplier.trim(),
+            location: location.trim(),
+            notes: notes.trim(),
+            photoThumb: null,
+            photoUpdatedAt: new Date().toISOString(),
+          });
+        } else if (pendingFullPhoto && pendingThumbPhoto) {
+          await saveItemPhoto(itemToEdit.id, pendingFullPhoto, pendingThumbPhoto);
+          await updateItem(itemToEdit.id, {
+            name: name.trim(),
+            sku: sku.trim().toUpperCase(),
+            type,
+            unit,
+            minStock: parsedMinStock,
+            unitCost: permissions.canViewCostPerUnit ? parsedCost : itemToEdit.unitCost,
+            sellingPrice: parsedSelling,
+            supplier: supplier.trim(),
+            location: location.trim(),
+            notes: notes.trim(),
+            photoThumb: pendingThumbPhoto,
+            photoUpdatedAt: new Date().toISOString(),
+          });
+        } else {
+          await updateItem(itemToEdit.id, {
+            name: name.trim(),
+            sku: sku.trim().toUpperCase(),
+            type,
+            unit,
+            minStock: parsedMinStock,
+            unitCost: permissions.canViewCostPerUnit ? parsedCost : itemToEdit.unitCost,
+            sellingPrice: parsedSelling,
+            supplier: supplier.trim(),
+            location: location.trim(),
+            notes: notes.trim(),
+          });
+        }
       } else {
-        // New item: records initial stock intake
-        await addItem({
-          name: name.trim(),
-          sku: sku.trim().toUpperCase(),
-          type,
-          category:
-            type === 'raw_material'
-              ? 'Raw Materials'
-              : type === 'semi_finished'
-              ? 'Semi Finished'
-              : type === 'finished_good'
-              ? 'Finished Goods'
-              : 'Composite Items',
-          unit,
-          quantity: parsedQuantity,
-          minStock: parsedMinStock,
-          unitCost: parsedCost,
-          sellingPrice: parsedSelling,
-          supplier: supplier.trim(),
-          location: location.trim(),
-          notes: notes.trim(),
-        });
+        // New item: records initial stock intake and full photo in item_photos
+        await addItem(
+          {
+            name: name.trim(),
+            sku: sku.trim().toUpperCase(),
+            type,
+            category:
+              type === 'raw_material'
+                ? 'Raw Materials'
+                : type === 'semi_finished'
+                ? 'Semi Finished'
+                : type === 'finished_good'
+                ? 'Finished Goods'
+                : 'Composite Items',
+            unit,
+            quantity: parsedQuantity,
+            minStock: parsedMinStock,
+            unitCost: parsedCost,
+            sellingPrice: parsedSelling,
+            supplier: supplier.trim(),
+            location: location.trim(),
+            notes: notes.trim(),
+            photoThumb: pendingThumbPhoto || undefined,
+            photoUpdatedAt: pendingThumbPhoto ? new Date().toISOString() : undefined,
+          },
+          pendingFullPhoto || undefined
+        );
       }
       onClose();
     } catch (err: any) {
       setError(formatFirestoreError(err, 'Failed to save item.'));
     } finally {
       setIsSubmitting(false);
+      setSavingPhotoText(null);
     }
+  };
+
+  const handlePhotoSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setIsProcessingPhoto(true);
+    setError(null);
+    try {
+      const { fullDataUrl, thumbDataUrl } = await resizeProductPhoto(file);
+      setPendingFullPhoto(fullDataUrl);
+      setPendingThumbPhoto(thumbDataUrl);
+      setIsPhotoRemoved(false);
+    } catch (err: any) {
+      console.error('Error processing product photo:', err);
+      setError(err?.message || 'Failed to process selected photo.');
+    } finally {
+      setIsProcessingPhoto(false);
+      if (e.target) e.target.value = '';
+    }
+  };
+
+  const handleRemovePhoto = () => {
+    setPhotoThumb(null);
+    setPendingFullPhoto(null);
+    setPendingThumbPhoto(null);
+    setIsPhotoRemoved(true);
   };
 
   const generateSku = () => {
@@ -219,7 +310,7 @@ export const ItemModal: React.FC<ItemModalProps> = ({
             </h2>
             <p className="text-xs text-slate-500">
               {type === 'raw_material'
-                ? 'Raw material consumed in recipes'
+                ? 'Raw material consumed in BOMs'
                 : 'Finished good produced and sold'}
             </p>
           </div>
@@ -242,6 +333,114 @@ export const ItemModal: React.FC<ItemModalProps> = ({
 
         {/* Scrollable Form Body */}
         <form id="item-form" onSubmit={handleSubmit} className="p-5 space-y-4 overflow-y-auto flex-1">
+          {/* Product Photo Section */}
+          <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-2xl space-y-2.5">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+                Product Photo
+              </span>
+              {(photoThumb || pendingThumbPhoto) && (
+                <button
+                  type="button"
+                  onClick={handleRemovePhoto}
+                  className="flex items-center gap-1 text-[11px] font-semibold text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100 px-2 py-0.5 rounded-lg border border-rose-200 transition cursor-pointer"
+                  title="Remove product photo"
+                >
+                  <X className="w-3.5 h-3.5 text-rose-600" />
+                  <span>Remove</span>
+                </button>
+              )}
+            </div>
+
+            <div className="flex items-center gap-3.5">
+              {/* Photo Preview Container */}
+              <div className="relative w-20 h-20 rounded-xl overflow-hidden shrink-0 border border-slate-200 bg-white flex flex-col items-center justify-center shadow-2xs">
+                {pendingThumbPhoto || photoThumb ? (
+                  <img
+                    src={pendingThumbPhoto || photoThumb || ''}
+                    alt="Preview"
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <div className="flex flex-col items-center justify-center text-center p-1 text-slate-400">
+                    <Camera className="w-5 h-5 text-slate-400" />
+                    <span className="text-[9px] font-medium text-slate-400 mt-0.5">No photo</span>
+                  </div>
+                )}
+
+                {/* Red ✕ badge button on top right of photo preview */}
+                {(pendingThumbPhoto || photoThumb) && (
+                  <button
+                    type="button"
+                    onClick={handleRemovePhoto}
+                    className="absolute top-1 right-1 w-5 h-5 rounded-full bg-rose-600 hover:bg-rose-700 text-white flex items-center justify-center shadow-xs cursor-pointer transition active:scale-90"
+                    title="Remove photo"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+
+              {/* Photo Buttons & Status */}
+              <div className="flex-1 space-y-1.5 min-w-0">
+                {/* Hidden File Inputs */}
+                <input
+                  ref={cameraInputRef}
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  className="hidden"
+                  onChange={handlePhotoSelect}
+                />
+                <input
+                  ref={galleryInputRef}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={handlePhotoSelect}
+                />
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => cameraInputRef.current?.click()}
+                    disabled={isProcessingPhoto || isSubmitting}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200/80 transition cursor-pointer active:scale-95 disabled:opacity-50"
+                  >
+                    <Camera className="w-3.5 h-3.5 text-indigo-600" />
+                    <span>Take Photo</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => galleryInputRef.current?.click()}
+                    disabled={isProcessingPhoto || isSubmitting}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 shadow-2xs transition cursor-pointer active:scale-95 disabled:opacity-50"
+                  >
+                    <ImageIcon className="w-3.5 h-3.5 text-slate-500" />
+                    <span>Choose from Gallery</span>
+                  </button>
+                </div>
+
+                {isProcessingPhoto && (
+                  <div className="flex items-center gap-1.5 text-xs text-indigo-600 font-medium pt-0.5">
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    <span>Processing photo...</span>
+                  </div>
+                )}
+                {isSubmitting && savingPhotoText && (
+                  <div className="flex items-center gap-1.5 text-xs text-indigo-600 font-semibold pt-0.5">
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    <span>{savingPhotoText}</span>
+                  </div>
+                )}
+                <p className="text-[10px] text-slate-400">
+                  Compressed automatically in browser (&lt;300 KB full, &lt;20 KB thumbnail).
+                </p>
+              </div>
+            </div>
+          </div>
+
           {/* Item Type selection */}
           <div>
             <label htmlFor="item-classification-select" className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1.5">
@@ -252,9 +451,9 @@ export const ItemModal: React.FC<ItemModalProps> = ({
                 id="item-classification-select"
                 value={type}
                 onChange={(e) => setType(e.target.value as ItemType)}
-                className="w-full px-3 py-2.5 text-sm rounded-xl border border-slate-300 bg-white font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 cursor-pointer appearance-none pr-10"
+                className="w-full h-[38px] px-3 text-sm rounded-xl border border-slate-300 bg-white font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 cursor-pointer appearance-none pr-10"
               >
-                <option value="raw_material">Raw Material (Ingredient / Input)</option>
+                <option value="raw_material">Raw Material (Component / Input)</option>
                 <option value="semi_finished">Semi Finished (Work in progress)</option>
                 <option value="finished_good">Finished Good (Ready for sale)</option>
                 <option value="both">Composite (Both input & output)</option>
@@ -264,10 +463,10 @@ export const ItemModal: React.FC<ItemModalProps> = ({
               </div>
             </div>
             <p className="mt-1 text-[11px] text-slate-500">
-              {type === 'raw_material' && 'Input ingredient consumed in recipes or assembly.'}
+              {type === 'raw_material' && 'Input material consumed in BOMs or assembly.'}
               {type === 'semi_finished' && 'Work in progress intermediate item produced and used internally.'}
               {type === 'finished_good' && 'Final product ready for sale and dispatch.'}
-              {type === 'both' && 'Composite item that can be both an ingredient and sold directly.'}
+              {type === 'both' && 'Composite item that can be both an input material and sold directly.'}
             </p>
           </div>
 
@@ -285,7 +484,7 @@ export const ItemModal: React.FC<ItemModalProps> = ({
                   setName(e.target.value);
                   if (error) setError(null);
                 }}
-                placeholder="e.g. Organic Bread Flour, Vanilla Latte"
+                placeholder="e.g. Lead Ingot, PLATE 12/12 PV, 12/12 GRAY BLUE"
                 className={`w-full px-3 py-2 text-sm rounded-xl border focus:outline-none transition ${
                   duplicateNameItem
                     ? 'border-rose-400 bg-rose-50/40 text-rose-900 focus:ring-2 focus:ring-rose-500'
@@ -341,7 +540,7 @@ export const ItemModal: React.FC<ItemModalProps> = ({
               <select
                 value={unit}
                 onChange={(e) => setUnit(e.target.value)}
-                className="w-full px-3 py-2 text-sm rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
+                className="w-full h-[38px] px-3 text-sm rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
               >
                 <option value="kg">kg (Kilograms)</option>
                 <option value="g">g (Grams)</option>
@@ -534,9 +733,18 @@ export const ItemModal: React.FC<ItemModalProps> = ({
             type="submit"
             form="item-form"
             disabled={isSubmitting || !!duplicateNameItem || !!duplicateSkuItem}
-            className="px-5 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl transition shadow-xs disabled:opacity-50 cursor-pointer active:scale-95"
+            className="px-5 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl transition shadow-xs disabled:opacity-50 cursor-pointer active:scale-95 flex items-center gap-1.5"
           >
-            {isSubmitting ? 'Saving...' : itemToEdit ? 'Save Changes' : 'Create Item'}
+            {isSubmitting ? (
+              <>
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                <span>{savingPhotoText || 'Saving...'}</span>
+              </>
+            ) : itemToEdit ? (
+              'Save Changes'
+            ) : (
+              'Create Item'
+            )}
           </button>
         </div>
       </div>

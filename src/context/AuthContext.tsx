@@ -30,7 +30,7 @@ import {
   ROLE_PERMISSIONS,
   RoleDefinition,
   DEFAULT_ROLE_DEFINITIONS,
-  TradePermissionKey,
+  resolveRolePermissions,
 } from '../types/inventory';
 
 export const BOOTSTRAP_ADMIN_EMAIL = 'kishanlimbani29@gmail.com';
@@ -98,6 +98,7 @@ interface AuthContextType {
   resetRolePermissions: () => Promise<void>;
   resetSingleRolePermissions: (targetRole: UserRole) => Promise<void>;
   addCustomRole: (newRole: Omit<RoleDefinition, 'isSystem'>) => Promise<void>;
+  renameCustomRole: (roleId: string, newTitle: string) => Promise<void>;
   deleteCustomRole: (roleId: string) => Promise<void>;
 }
 
@@ -140,10 +141,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (parsed && typeof parsed === 'object') {
           return {
             ...parsed,
-            admin: { ...ROLE_PERMISSIONS.admin, ...(parsed.admin || {}) },
-            manager: { ...ROLE_PERMISSIONS.manager, ...(parsed.manager || {}) },
-            staff: { ...ROLE_PERMISSIONS.staff, ...(parsed.staff || {}) },
-            viewer: { ...ROLE_PERMISSIONS.viewer, ...(parsed.viewer || {}) },
+            admin: resolveRolePermissions('admin', parsed),
+            manager: resolveRolePermissions('manager', parsed),
+            staff: resolveRolePermissions('staff', parsed),
+            viewer: resolveRolePermissions('viewer', parsed),
           };
         }
       }
@@ -190,14 +191,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             } catch {}
           }
           if (data.permissions) {
-            const merged = {
-              ...data.permissions,
-              admin: { ...ROLE_PERMISSIONS.admin, ...(data.permissions.admin || {}) },
-              manager: { ...ROLE_PERMISSIONS.manager, ...(data.permissions.manager || {}) },
-              staff: { ...ROLE_PERMISSIONS.staff, ...(data.permissions.staff || {}) },
-              viewer: { ...ROLE_PERMISSIONS.viewer, ...(data.permissions.viewer || {}) },
+            const latestCustomRoles = Array.isArray(data.customRoles) ? data.customRoles : customRoles;
+            const merged: Record<string, RolePermissions> = {
+              admin: resolveRolePermissions('admin', data.permissions, latestCustomRoles),
+              manager: resolveRolePermissions('manager', data.permissions, latestCustomRoles),
+              staff: resolveRolePermissions('staff', data.permissions, latestCustomRoles),
+              viewer: resolveRolePermissions('viewer', data.permissions, latestCustomRoles),
             };
-            setRolePermissions(merged);
+            Object.keys(data.permissions).forEach((roleKey) => {
+              if (!merged[roleKey]) {
+                merged[roleKey] = resolveRolePermissions(roleKey, data.permissions, latestCustomRoles);
+              }
+            });
+            setRolePermissions(merged as Record<UserRole, RolePermissions>);
             try {
               localStorage.setItem('stodo_role_permissions', JSON.stringify(merged));
             } catch {}
@@ -382,20 +388,27 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return profile?.role || 'viewer';
   }, [profile]);
 
-  // Only actual Admins can test/simulate another role
+  // Admins or users whose real role has canManageUsers can test/simulate another role
   const isRealAdmin = useMemo(() => {
     return actualRole === 'admin' && profile?.status === 'active';
   }, [actualRole, profile]);
 
+  const canRealUserManageTeam = useMemo(() => {
+    if (isRealAdmin) return true;
+    if (profile?.status !== 'active') return false;
+    const basePerms = resolveRolePermissions(actualRole, rolePermissions, customRoles);
+    return Boolean(basePerms.canManageUsers);
+  }, [isRealAdmin, profile, rolePermissions, actualRole, customRoles]);
+
   // Effective role used for UI capability evaluation
   const effectiveRole: UserRole = useMemo(() => {
-    if (isRealAdmin && simulatedRole) {
+    if (canRealUserManageTeam && simulatedRole) {
       return simulatedRole;
     }
     return actualRole;
-  }, [isRealAdmin, simulatedRole, actualRole]);
+  }, [canRealUserManageTeam, simulatedRole, actualRole]);
 
-  const isTestingRole = Boolean(isRealAdmin && simulatedRole && simulatedRole !== actualRole);
+  const isTestingRole = Boolean(canRealUserManageTeam && simulatedRole && simulatedRole !== actualRole);
 
   // Load Team & Invites ONLY for real Admins
   useEffect(() => {
@@ -452,66 +465,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Derived capability permissions based on effective role
   const permissions = useMemo<RolePermissions>(() => {
-    let resolved: RolePermissions | undefined;
-    if (rolePermissions && rolePermissions[effectiveRole]) {
-      resolved = rolePermissions[effectiveRole];
-    } else if (ROLE_PERMISSIONS[effectiveRole as keyof typeof ROLE_PERMISSIONS]) {
-      resolved = ROLE_PERMISSIONS[effectiveRole as keyof typeof ROLE_PERMISSIONS];
-    } else {
-      const foundCustom = customRoles.find((c) => c.id === effectiveRole);
-      if (foundCustom) {
-        resolved = foundCustom.permissions;
-      }
-    }
-
-    if (!resolved) {
-      resolved = ROLE_PERMISSIONS.viewer;
-    }
-
-    const tradeDefault = (key: TradePermissionKey): boolean => {
-      const base = ROLE_PERMISSIONS[effectiveRole as keyof typeof ROLE_PERMISSIONS];
-      return base ? Boolean(base[key]) : false;
-    };
-
-    return {
-      canEditItems: resolved.canEditItems ?? false,
-      canDeleteItems: resolved.canDeleteItems ?? false,
-      canOpenProductDetail: resolved.canOpenProductDetail ?? (effectiveRole !== 'viewer'),
-      canEditRecipes: resolved.canEditRecipes ?? false,
-      canDeleteRecipes: resolved.canDeleteRecipes ?? false,
-      canProduceBatch: resolved.canProduceBatch ?? false,
-      canAdjustStock: resolved.canAdjustStock ?? false,
-      canViewCostPerUnit: resolved.canViewCostPerUnit ?? (effectiveRole === 'admin' || effectiveRole === 'manager'),
-      canViewTotalAssetValue: resolved.canViewTotalAssetValue ?? (effectiveRole === 'admin' || effectiveRole === 'manager'),
-      canViewFinances: resolved.canViewFinances ?? false,
-      canViewShelfOption: resolved.canViewShelfOption ?? (effectiveRole === 'admin' || effectiveRole === 'manager' || effectiveRole === 'staff'),
-      canViewBatchProductionOption: resolved.canViewBatchProductionOption ?? (effectiveRole !== 'viewer'),
-      canViewAuditReports: resolved.canViewAuditReports ?? true,
-      canViewStockMovementsOption: resolved.canViewStockMovementsOption ?? true,
-      canViewRolesAccessOption: resolved.canViewRolesAccessOption ?? (effectiveRole !== 'viewer'),
-      canExportExcel: resolved.canExportExcel ?? (effectiveRole !== 'viewer'),
-      canSubmitAuditRequests: resolved.canSubmitAuditRequests ?? (effectiveRole !== 'viewer'),
-      canAuditRequests: resolved.canAuditRequests ?? (effectiveRole === 'admin' || effectiveRole === 'manager'),
-      canManageUsers: resolved.canManageUsers ?? (effectiveRole === 'admin'),
-      // Sales & Purchase (missing keys fall back to the role's default)
-      canViewSalesOption: resolved.canViewSalesOption ?? tradeDefault('canViewSalesOption'),
-      canCreateSales: resolved.canCreateSales ?? tradeDefault('canCreateSales'),
-      canEditSales: resolved.canEditSales ?? tradeDefault('canEditSales'),
-      canDeleteSales: resolved.canDeleteSales ?? tradeDefault('canDeleteSales'),
-      canRecordPayments: resolved.canRecordPayments ?? tradeDefault('canRecordPayments'),
-      canCreateSalesReturn: resolved.canCreateSalesReturn ?? tradeDefault('canCreateSalesReturn'),
-      canEditSalesReturn: resolved.canEditSalesReturn ?? tradeDefault('canEditSalesReturn'),
-      canDeleteSalesReturn: resolved.canDeleteSalesReturn ?? tradeDefault('canDeleteSalesReturn'),
-      canViewPurchaseOption: resolved.canViewPurchaseOption ?? tradeDefault('canViewPurchaseOption'),
-      canCreatePurchase: resolved.canCreatePurchase ?? tradeDefault('canCreatePurchase'),
-      canEditPurchase: resolved.canEditPurchase ?? tradeDefault('canEditPurchase'),
-      canDeletePurchase: resolved.canDeletePurchase ?? tradeDefault('canDeletePurchase'),
-      canReceivePurchase: resolved.canReceivePurchase ?? tradeDefault('canReceivePurchase'),
-      canRecordPurchasePayments: resolved.canRecordPurchasePayments ?? tradeDefault('canRecordPurchasePayments'),
-      canCreatePurchaseReturn: resolved.canCreatePurchaseReturn ?? tradeDefault('canCreatePurchaseReturn'),
-      canEditPurchaseReturn: resolved.canEditPurchaseReturn ?? tradeDefault('canEditPurchaseReturn'),
-      canDeletePurchaseReturn: resolved.canDeletePurchaseReturn ?? tradeDefault('canDeletePurchaseReturn'),
-    };
+    return resolveRolePermissions(effectiveRole, rolePermissions, customRoles);
   }, [rolePermissions, effectiveRole, customRoles]);
 
   // Real logged-in user identification
@@ -694,8 +648,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Preview / Simulation
   const switchSimulatedRole = (newRole: UserRole) => {
-    if (!isRealAdmin) {
-      console.warn('Only administrators can test as another role.');
+    if (!canRealUserManageTeam) {
+      console.warn('Only administrators or team managers can test as another role.');
+      return;
+    }
+    if (newRole === 'admin') {
       return;
     }
     setSimulatedRole(newRole);
@@ -1014,6 +971,42 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  const renameCustomRole = async (roleId: string, newTitle: string) => {
+    if (!isRealAdmin) {
+      throw new Error('Only administrators have authority to rename custom roles.');
+    }
+    if (['admin', 'manager', 'staff', 'viewer'].includes(roleId)) {
+      throw new Error('Built-in system roles cannot be renamed.');
+    }
+    const trimmed = newTitle.trim();
+    if (!trimmed) {
+      throw new Error('Role name cannot be empty.');
+    }
+
+    const updatedCustomRoles = customRoles.map((r) =>
+      r.id === roleId ? { ...r, title: trimmed } : r
+    );
+
+    setCustomRoles(updatedCustomRoles);
+    try {
+      localStorage.setItem('stodo_custom_roles', JSON.stringify(updatedCustomRoles));
+    } catch {}
+
+    try {
+      await setDoc(
+        doc(db, 'settings', 'roles_permissions'),
+        {
+          customRoles: updatedCustomRoles,
+          updatedAt: new Date().toISOString(),
+        },
+        { merge: true }
+      );
+    } catch (err) {
+      console.warn('Failed to rename custom role in Firestore:', err);
+      throw err;
+    }
+  };
+
   return (
     <AuthContext.Provider
       value={{
@@ -1060,6 +1053,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         resetRolePermissions,
         resetSingleRolePermissions,
         addCustomRole,
+        renameCustomRole,
         deleteCustomRole,
       }}
     >

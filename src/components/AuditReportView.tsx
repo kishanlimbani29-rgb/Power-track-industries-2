@@ -2,51 +2,161 @@ import React, { useState, useMemo } from 'react';
 import {
   ClipboardCheck,
   Plus,
-  Clock,
+  Check,
+  X,
   CheckCircle2,
   XCircle,
   AlertTriangle,
   Boxes,
   Truck,
+  Package,
   PackagePlus,
   Search,
-  Filter,
-  Download,
-  Calendar,
   User,
-  ShieldAlert,
-  ArrowRight,
   Info,
-  Layers,
-  ChevronDown,
-  Building,
   RotateCcw,
   Trash2,
   FileSpreadsheet,
+  Factory,
 } from 'lucide-react';
 import { useInventory } from '../context/InventoryContext';
 import { useAuth } from '../context/AuthContext';
 import { formatFirestoreError } from '../firebase/config';
 import { AuditRequest, AuditRequestType, AuditRequestStatus } from '../types/inventory';
 import { downloadExcelFile } from '../utils/fileDownload';
+import { formatQty, formatInrAmount, formatShortDateTime, formatShortDate, formatTime12h } from '../utils/numberFormat';
+
+const toLocalDayKey = (iso?: string): string => {
+  const d = iso ? new Date(iso) : new Date();
+  if (Number.isNaN(d.getTime())) {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  }
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+const shiftDayKey = (daysOffset: number): string => {
+  const d = new Date();
+  d.setDate(d.getDate() + daysOffset);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+const formatCardTime = (iso: string, todayKey: string, yesterdayKey: string): string => {
+  const dayKey = toLocalDayKey(iso);
+  const d = new Date(iso);
+  if (dayKey === todayKey && !Number.isNaN(d.getTime())) {
+    const timeStr = formatTime12h(d);
+    return `Today ${timeStr}`;
+  }
+  if (dayKey === yesterdayKey) return 'Yesterday';
+  if (Number.isNaN(d.getTime())) return dayKey;
+  return formatShortDate(d, true);
+};
+
+const formatDaySectionLabel = (dayKey: string, todayKey: string, yesterdayKey: string): string => {
+  if (dayKey === todayKey) return 'TODAY';
+  if (dayKey === yesterdayKey) return 'YESTERDAY';
+  const d = new Date(`${dayKey}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return dayKey.toUpperCase();
+  return formatShortDate(d, true).toUpperCase();
+};
+
+const formatStockChangeSummary = (req: AuditRequest, canViewCost: boolean): string => {
+  if (req.type === 'production') {
+    const yieldPart = `+${formatQty(req.expectedYield ?? 0, req.unit)} ${req.finishedItemName || ''}`.trim();
+    const mats = req.materialsNeeded || [];
+    if (mats.length === 0) return yieldPart;
+    const head = mats
+      .slice(0, 2)
+      .map((m) => `${m.rawItemName} × ${formatQty(m.quantity, m.unit)} ${m.unit}`)
+      .join(', ');
+    const more = mats.length > 2 ? ` +${mats.length - 2} more` : '';
+    return `${yieldPart} · uses ${head}${more}`;
+  }
+  if (req.type === 'dispatch') {
+    const parts = [`−${formatQty(req.dispatchQuantity ?? 0, req.dispatchUnit)} ${req.dispatchItemName || ''}`.trim()];
+    if (req.customerOrDestination) parts.push(req.customerOrDestination);
+    return parts.join(' · ');
+  }
+  const parts = [`+${formatQty(req.rawQuantity ?? 0, req.rawUnit)} ${req.rawUnit || ''} ${req.rawItemName || ''}`.trim()];
+  if (req.supplierName) parts.push(req.supplierName);
+  if (canViewCost && req.unitPurchaseCost !== undefined) {
+    parts.push(`${formatInrAmount(req.unitPurchaseCost)}/${req.rawUnit || 'unit'}`);
+  }
+  return parts.join(' · ');
+};
 
 export const AuditReportView: React.FC = () => {
   const {
     items,
     recipes,
     auditRequests,
-    pendingAuditCount,
     submitAuditRequest,
     approveAuditRequest,
     rejectAuditRequest,
     deleteAuditRequest,
+    showActionToast,
   } = useInventory();
-  const { permissions, simulatedName, role } = useAuth();
+  const { permissions, simulatedName, teamMembers, currentUser, profile, realUserName, actualRole } = useAuth();
+
+  const resolveDisplayName = (rawName?: string, roleHint?: string): string => {
+    const trimmed = (rawName || '').trim();
+    if (trimmed) {
+      const byUid = teamMembers.find((m) => m.uid === trimmed);
+      if (byUid) {
+        return byUid.displayName || byUid.email || trimmed;
+      }
+    }
+    const lower = trimmed.toLowerCase();
+    const isGeneric =
+      !trimmed ||
+      lower === 'user' ||
+      lower.startsWith('user (');
+    if (!isGeneric) {
+      return trimmed;
+    }
+
+    if (roleHint) {
+      const matchingRoleMembers = teamMembers.filter(
+        (m) => m.role === roleHint && m.status === 'active'
+      );
+      if (matchingRoleMembers.length === 1 && matchingRoleMembers[0].displayName) {
+        return matchingRoleMembers[0].displayName;
+      }
+      if (roleHint === 'admin') {
+        const owner = matchingRoleMembers.find(
+          (m) => m.email?.toLowerCase() === 'kishanlimbani29@gmail.com'
+        );
+        if (owner?.displayName) return owner.displayName;
+      }
+      if (roleHint === actualRole) {
+        const selfName = realUserName || currentUser?.displayName || profile?.displayName;
+        if (selfName && selfName.trim().toLowerCase() !== 'user') {
+          return selfName.trim();
+        }
+      }
+    }
+
+    const adminMember = teamMembers.find((m) => m.role === 'admin' && m.status === 'active' && m.displayName);
+    const selfFallback =
+      (realUserName && realUserName.toLowerCase() !== 'user' ? realUserName : '') ||
+      currentUser?.displayName ||
+      profile?.displayName ||
+      adminMember?.displayName ||
+      currentUser?.email?.split('@')[0];
+
+    if (selfFallback) return selfFallback;
+    if (roleHint === 'admin' || lower.includes('administrator') || lower.includes('owner')) {
+      return 'Admin';
+    }
+    return trimmed || 'Team Member';
+  };
 
   // Tab & Filter States
   const [activeStatusTab, setActiveStatusTab] = useState<'all' | AuditRequestStatus>('pending');
   const [filterType, setFilterType] = useState<'all' | AuditRequestType>('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   // Modal State for New Audit Request Entry
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -159,7 +269,7 @@ export const AuditReportView: React.FC = () => {
     try {
       if (entryType === 'production') {
         if (!selectedRecipe) {
-          setFeedbackMessage({ type: 'error', text: 'Please select a recipe for production.' });
+          setFeedbackMessage({ type: 'error', text: 'Please select a BOM for production.' });
           return;
         }
         if (prodBatchMultiplier <= 0) {
@@ -290,47 +400,70 @@ export const AuditReportView: React.FC = () => {
   // Execute Audit Approval (Take into account)
   const handleConfirmAuditAction = async () => {
     if (!selectedAuditRequest || !auditAction) return;
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      setFeedbackMessage({
+        type: 'error',
+        text: 'No internet connection — nothing was saved. Please try again.',
+      });
+      setSelectedAuditRequest(null);
+      setAuditAction(null);
+      setAuditNotesInput('');
+      return;
+    }
 
-    setIsProcessing(true);
+    const req = selectedAuditRequest;
+    const action = auditAction;
+    const notes = auditNotesInput.trim() || undefined;
+
+    setSelectedAuditRequest(null);
+    setAuditAction(null);
+    setAuditNotesInput('');
+    setIsProcessing(false);
+
+    showActionToast('Saving…', req.title, 'saving');
+
     try {
-      if (auditAction === 'approve') {
-        const result = await approveAuditRequest(selectedAuditRequest.id, auditNotesInput.trim() || undefined);
+      if (action === 'approve') {
+        const result = await approveAuditRequest(req.id, notes);
         if (result.success) {
+          showActionToast('Audit approved', req.title, 'success');
           setFeedbackMessage({
             type: 'success',
-            text: `Audit Approved! Entry "${selectedAuditRequest.title}" has been verified and fully taken into account in live inventory.`,
+            text: `Audit Approved! Entry "${req.title}" has been verified and fully taken into account in live inventory.`,
           });
         } else {
+          const errText = result.error || 'Inventory could not be updated.';
+          showActionToast('Audit failed', errText, 'error');
           setFeedbackMessage({
             type: 'error',
-            text: `Audit failed: ${result.error || 'Inventory could not be updated.'}`,
+            text: `Audit failed: ${errText}`,
           });
         }
-      } else if (auditAction === 'reject') {
-        const result = await rejectAuditRequest(selectedAuditRequest.id, auditNotesInput.trim() || undefined);
+      } else if (action === 'reject') {
+        const result = await rejectAuditRequest(req.id, notes);
         if (result.success) {
+          showActionToast('Request rejected', req.title, 'success');
           setFeedbackMessage({
             type: 'success',
-            text: `Audit Rejected. Request "${selectedAuditRequest.title}" was marked as rejected and no inventory changes were applied.`,
+            text: `Audit Rejected. Request "${req.title}" was marked as rejected and no inventory changes were applied.`,
           });
         } else {
+          const errText = result.error || 'Could not update request.';
+          showActionToast('Rejection failed', errText, 'error');
           setFeedbackMessage({
             type: 'error',
-            text: `Rejection failed: ${result.error || 'Could not update request.'}`,
+            text: `Rejection failed: ${errText}`,
           });
         }
       }
     } catch (err: any) {
       console.error(err);
+      const errText = formatFirestoreError(err, 'An unexpected error occurred during auditing.');
+      showActionToast('Audit failed', errText, 'error');
       setFeedbackMessage({
         type: 'error',
-        text: formatFirestoreError(err, 'An unexpected error occurred during auditing.'),
+        text: errText,
       });
-    } finally {
-      setIsProcessing(false);
-      setSelectedAuditRequest(null);
-      setAuditAction(null);
-      setAuditNotesInput('');
     }
   };
 
@@ -344,10 +477,10 @@ export const AuditReportView: React.FC = () => {
         'Entry Type': r.type.toUpperCase(),
         'Title / Details': r.title,
         'Status': r.status.toUpperCase(),
-        'Submitted By': r.submittedBy,
+        'Submitted By': resolveDisplayName(r.submittedBy, r.submittedByRole),
         'Submission Date': subDate.toLocaleDateString(),
         'Submission Time': subDate.toLocaleTimeString(),
-        'Audited By': r.auditedBy || 'N/A',
+        'Audited By': r.auditedBy ? resolveDisplayName(r.auditedBy) : 'N/A',
         'Audit Date': audDate ? audDate.toLocaleDateString() : 'N/A',
         'Audit Notes': r.auditNotes || '',
         'Submitter Remarks': r.notes || '',
@@ -379,186 +512,379 @@ export const AuditReportView: React.FC = () => {
     }
   };
 
-  return (
-    <div className="space-y-6 pb-12">
-      {/* Top Banner & Header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-5 sm:p-6 rounded-2xl border border-slate-200 shadow-2xs">
-        <div className="flex items-start gap-4">
-          <div className="w-12 h-12 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0 shadow-xs">
-            <ClipboardCheck className="w-6 h-6" />
+  const todayKey = toLocalDayKey();
+  const yesterdayKey = shiftDayKey(-1);
+
+  const pendingRequests = useMemo(
+    () =>
+      filteredRequests
+        .filter((r) => r.status === 'pending')
+        .sort((a, b) => (new Date(b.submittedAt).getTime() || 0) - (new Date(a.submittedAt).getTime() || 0)),
+    [filteredRequests]
+  );
+
+  const resolvedRequests = useMemo(
+    () =>
+      filteredRequests
+        .filter((r) => r.status !== 'pending')
+        .sort((a, b) => (new Date(b.submittedAt).getTime() || 0) - (new Date(a.submittedAt).getTime() || 0)),
+    [filteredRequests]
+  );
+
+  const resolvedDayGroups = useMemo(() => {
+    const groups: { dayKey: string; label: string; items: AuditRequest[] }[] = [];
+    const byKey = new Map<string, (typeof groups)[number]>();
+    for (const req of resolvedRequests) {
+      const dk = toLocalDayKey(req.submittedAt);
+      let grp = byKey.get(dk);
+      if (!grp) {
+        grp = {
+          dayKey: dk,
+          label: formatDaySectionLabel(dk, todayKey, yesterdayKey),
+          items: [],
+        };
+        byKey.set(dk, grp);
+        groups.push(grp);
+      }
+      grp.items.push(req);
+    }
+    return groups;
+  }, [resolvedRequests, todayKey, yesterdayKey]);
+
+  const renderTypeIcon = (type: AuditRequestType, size: 'md' | 'sm' = 'md') => {
+    const boxSize = size === 'md' ? 'w-10 h-10' : 'w-8 h-8';
+    const iconSize = size === 'md' ? 'w-4 h-4' : 'w-3.5 h-3.5';
+    if (type === 'production') {
+      return (
+        <div className={`${boxSize} rounded-full bg-indigo-50 border border-indigo-100 text-indigo-600 flex items-center justify-center shrink-0`}>
+          <Factory className={iconSize} />
+        </div>
+      );
+    }
+    if (type === 'dispatch') {
+      return (
+        <div className={`${boxSize} rounded-full bg-amber-50 border border-amber-100 text-amber-600 flex items-center justify-center shrink-0`}>
+          <Truck className={iconSize} />
+        </div>
+      );
+    }
+    return (
+      <div className={`${boxSize} rounded-full bg-emerald-50 border border-emerald-100 text-emerald-600 flex items-center justify-center shrink-0`}>
+        <Package className={iconSize} />
+      </div>
+    );
+  };
+
+  const renderExpandedDetail = (req: AuditRequest) => {
+    const isApproved = req.status === 'approved';
+    return (
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="mt-3 p-3.5 bg-slate-50/90 rounded-xl border border-slate-200/80 text-xs text-slate-700 space-y-2.5"
+      >
+        <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500">
+          <span className="truncate">
+            ID: <span className="font-mono text-slate-700">{req.id.slice(-8)}</span> ·{' '}
+            {formatShortDateTime(req.submittedAt)}
+            {req.submittedByRole ? ` · ${req.submittedByRole}` : ''}
+          </span>
+          {permissions.canAuditRequests && (
+            <button
+              type="button"
+              onClick={() => setRequestToDelete(req)}
+              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-bold text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-200 transition cursor-pointer shrink-0"
+              title="Delete record"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>Delete</span>
+            </button>
+          )}
+        </div>
+
+        {/* Production Run Details */}
+        {req.type === 'production' && (
+          <div className="space-y-2">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+              <div>
+                <span className="text-slate-400 block">BOM</span>
+                <span className="font-bold text-slate-800">{req.recipeName}</span>
+              </div>
+              <div>
+                <span className="text-slate-400 block">Batch Multiplier</span>
+                <span className="font-bold text-slate-800">{req.batchMultiplier}x Batch</span>
+              </div>
+              <div>
+                <span className="text-slate-400 block">Expected Yield</span>
+                <span className="font-bold text-emerald-700">
+                  +{formatQty(req.expectedYield, req.unit)} {req.unit} ({req.finishedItemName})
+                </span>
+              </div>
+              <div>
+                <span className="text-slate-400 block">Status Impact</span>
+                <span className="font-bold text-slate-600">
+                  {isApproved ? 'Stock Deducted & Added' : 'Pending Verification'}
+                </span>
+              </div>
+            </div>
+
+            {req.materialsNeeded && req.materialsNeeded.length > 0 && (
+              <div className="pt-2 border-t border-slate-200">
+                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1">
+                  Raw Materials to Deduct Upon Approval:
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {req.materialsNeeded.map((mat) => (
+                    <span
+                      key={mat.rawItemId}
+                      className="text-[11px] bg-white border border-slate-200 text-slate-700 px-2 py-0.5 rounded-md"
+                    >
+                      <strong>{mat.rawItemName}:</strong> {formatQty(mat.quantity, mat.unit)} {mat.unit}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
-          <div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <h1 className="text-xl font-bold text-slate-900">Audit Reports & Verification</h1>
-              <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200">
-                Quality & Stock Governance
+        )}
+
+        {/* Dispatch Details */}
+        {req.type === 'dispatch' && (
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-[11px]">
+            <div>
+              <span className="text-slate-400 block">Dispatched Good</span>
+              <span className="font-bold text-slate-800">{req.dispatchItemName}</span>
+            </div>
+            <div>
+              <span className="text-slate-400 block">Quantity Deducted</span>
+              <span className="font-bold text-sky-700">
+                -{formatQty(req.dispatchQuantity, req.dispatchUnit)} {req.dispatchUnit}
               </span>
-              {pendingAuditCount > 0 && (
-                <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-500 text-white text-xs font-bold animate-pulse">
-                  <Clock className="w-3.5 h-3.5" />
-                  <span>{pendingAuditCount} Pending Audit</span>
+            </div>
+            <div>
+              <span className="text-slate-400 block">Customer / Destination</span>
+              <span className="font-bold text-slate-800">
+                {req.customerOrDestination || 'Internal Facility'}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* Raw Material In Details */}
+        {req.type === 'raw_material_in' && (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+            <div>
+              <span className="text-slate-400 block">Raw Material</span>
+              <span className="font-bold text-slate-800">{req.rawItemName}</span>
+            </div>
+            <div>
+              <span className="text-slate-400 block">Quantity Received</span>
+              <span className="font-bold text-emerald-700">
+                +{formatQty(req.rawQuantity, req.rawUnit)} {req.rawUnit}
+              </span>
+            </div>
+            <div>
+              <span className="text-slate-400 block">Supplier</span>
+              <span className="font-bold text-slate-800">{req.supplierName || 'Standard Vendor'}</span>
+            </div>
+            {permissions.canViewCostPerUnit && req.unitPurchaseCost !== undefined && (
+              <div>
+                <span className="text-slate-400 block">Unit Cost</span>
+                <span className="font-bold text-teal-700">
+                  {formatInrAmount(req.unitPurchaseCost, 2)} / {req.rawUnit}
+                </span>
+              </div>
+            )}
+            {req.shelfLocation && (
+              <div>
+                <span className="text-slate-400 block">Shelf / Bin</span>
+                <span className="font-bold text-slate-700">{req.shelfLocation}</span>
+              </div>
+            )}
+            {req.batchNumber && (
+              <div>
+                <span className="text-slate-400 block">Lot / Batch #</span>
+                <span className="font-mono text-slate-700">{req.batchNumber}</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Notes from submitter */}
+        {req.notes && (
+          <div className="pt-2 border-t border-slate-200 text-[11px]">
+            <span className="text-slate-400 block font-semibold">Submitter Notes:</span>
+            <p className="text-slate-600 italic">&quot;{req.notes}&quot;</p>
+          </div>
+        )}
+
+        {/* Audit Resolution Remarks (If resolved) */}
+        {(req.auditedBy || req.auditNotes || req.executionError) && (
+          <div
+            className={`pt-2 border-t text-[11px] rounded-lg p-2.5 mt-1 ${
+              isApproved
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                : 'bg-rose-50 border-rose-200 text-rose-900'
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2 font-bold text-[11px] mb-1">
+              <span className="break-words">
+                {isApproved ? '✓ Audited & Approved' : '✗ Audit Rejected'}
+                {req.auditedBy ? ` by ${resolveDisplayName(req.auditedBy)}` : ''}
+              </span>
+              {req.auditedAt && (
+                <span className="font-normal text-[10px] opacity-80 shrink-0">
+                  {formatShortDateTime(req.auditedAt)}
                 </span>
               )}
             </div>
+            {req.auditNotes && (
+              <p className="text-[11px] italic">Remarks: &quot;{req.auditNotes}&quot;</p>
+            )}
+            {req.executionError && (
+              <p className="text-[11px] font-bold text-rose-700 mt-1">
+                Execution note: {req.executionError}
+              </p>
+            )}
           </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div className="space-y-3.5 max-w-[900px] mx-auto pb-24 overflow-x-clip">
+      {/* 1. HEADER: One compact row */}
+      <div className="flex items-center justify-end sm:justify-between gap-2">
+        <div className="hidden sm:flex items-center gap-2.5 min-w-0">
+          <div className="w-9 h-9 rounded-xl bg-indigo-50 border border-indigo-200 text-indigo-600 flex items-center justify-center shrink-0">
+            <ClipboardCheck className="w-4 h-4" />
+          </div>
+          <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight truncate">
+            Audit
+          </h1>
         </div>
 
-        <div className="flex items-center gap-2 flex-wrap">
-          <button
-            onClick={handleExportExcel}
-            type="button"
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 shadow-2xs transition cursor-pointer active:scale-95"
-            title="Download audit log as Excel (.xlsx)"
-          >
-            <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
-            <span>Export Excel</span>
-          </button>
-
-          {permissions.canSubmitAuditRequests ? (
-            <button
-              onClick={() => setIsModalOpen(true)}
-              type="button"
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 shadow-xs transition cursor-pointer"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Enter New Request</span>
-            </button>
-          ) : (
-            <div className="text-xs text-slate-400 bg-slate-100 px-3 py-1.5 rounded-xl border border-slate-200 font-medium">
-              Entry creation restricted for {role}
-            </div>
-          )}
-        </div>
+        <button
+          onClick={handleExportExcel}
+          type="button"
+          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold text-emerald-800 bg-white hover:bg-emerald-50 border border-slate-200 shadow-2xs transition cursor-pointer active:scale-95 shrink-0"
+          title="Download audit log as Excel (.xlsx)"
+        >
+          <FileSpreadsheet className="w-4 h-4 text-emerald-600 shrink-0" />
+          <span>Excel</span>
+        </button>
       </div>
 
       {/* Feedback Alert Toast */}
       {feedbackMessage && (
         <div
-          className={`p-4 rounded-xl text-xs font-semibold flex items-center justify-between gap-3 border shadow-2xs transition ${
+          className={`p-3.5 rounded-xl text-xs font-semibold flex items-center justify-between gap-3 border shadow-2xs transition ${
             feedbackMessage.type === 'success'
               ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
               : 'bg-rose-50 text-rose-800 border-rose-200'
           }`}
         >
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 min-w-0">
             {feedbackMessage.type === 'success' ? (
               <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
             ) : (
               <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
             )}
-            <span>{feedbackMessage.text}</span>
+            <span className="break-words">{feedbackMessage.text}</span>
           </div>
           <button
+            type="button"
             onClick={() => setFeedbackMessage(null)}
-            className="text-xs underline hover:no-underline cursor-pointer"
+            className="text-xs underline hover:no-underline cursor-pointer shrink-0"
           >
             Dismiss
           </button>
         </div>
       )}
 
-      {/* Statistics & Quick Filter - Small & Fit in One Line (Marked with Black) */}
-      <div className="grid grid-cols-4 gap-1.5 sm:gap-3">
-        {/* Pending Box */}
-        <button
-          type="button"
-          onClick={() => setActiveStatusTab(activeStatusTab === 'pending' ? 'all' : 'pending')}
-          className={`py-2 px-1.5 sm:px-2.5 rounded-xl border text-center transition cursor-pointer flex flex-col items-center justify-center ${
-            activeStatusTab === 'pending'
-              ? 'bg-amber-50 border-amber-400 ring-2 ring-amber-400/30 shadow-2xs'
-              : 'bg-white border-slate-200 hover:border-slate-300'
-          }`}
-        >
-          <div className="flex items-center gap-1 text-[11px] sm:text-xs font-semibold text-slate-600 truncate">
-            <Clock className="w-3 h-3 text-amber-500 shrink-0" />
-            <span className="truncate">Pending</span>
-          </div>
-          <div className="text-sm sm:text-base font-black text-slate-900 leading-tight mt-0.5">
-            {stats.pending}
-          </div>
-        </button>
-
-        {/* Approved Box */}
-        <button
-          type="button"
-          onClick={() => setActiveStatusTab(activeStatusTab === 'approved' ? 'all' : 'approved')}
-          className={`py-2 px-1.5 sm:px-2.5 rounded-xl border text-center transition cursor-pointer flex flex-col items-center justify-center ${
-            activeStatusTab === 'approved'
-              ? 'bg-emerald-50 border-emerald-400 ring-2 ring-emerald-400/30 shadow-2xs'
-              : 'bg-white border-slate-200 hover:border-slate-300'
-          }`}
-        >
-          <div className="flex items-center gap-1 text-[11px] sm:text-xs font-semibold text-slate-600 truncate">
-            <CheckCircle2 className="w-3 h-3 text-emerald-500 shrink-0" />
-            <span className="truncate">Approved</span>
-          </div>
-          <div className="text-sm sm:text-base font-black text-slate-900 leading-tight mt-0.5">
-            {stats.approved}
-          </div>
-        </button>
-
-        {/* Rejected Box */}
-        <button
-          type="button"
-          onClick={() => setActiveStatusTab(activeStatusTab === 'rejected' ? 'all' : 'rejected')}
-          className={`py-2 px-1.5 sm:px-2.5 rounded-xl border text-center transition cursor-pointer flex flex-col items-center justify-center ${
-            activeStatusTab === 'rejected'
-              ? 'bg-rose-50 border-rose-400 ring-2 ring-rose-400/30 shadow-2xs'
-              : 'bg-white border-slate-200 hover:border-slate-300'
-          }`}
-        >
-          <div className="flex items-center gap-1 text-[11px] sm:text-xs font-semibold text-slate-600 truncate">
-            <XCircle className="w-3 h-3 text-rose-500 shrink-0" />
-            <span className="truncate">Rejected</span>
-          </div>
-          <div className="text-sm sm:text-base font-black text-slate-900 leading-tight mt-0.5">
-            {stats.rejected}
-          </div>
-        </button>
-
-        {/* Total Box */}
-        <button
-          type="button"
-          onClick={() => setActiveStatusTab('all')}
-          className={`py-2 px-1.5 sm:px-2.5 rounded-xl border text-center transition cursor-pointer flex flex-col items-center justify-center ${
-            activeStatusTab === 'all'
-              ? 'bg-indigo-50 border-indigo-400 ring-2 ring-indigo-400/30 shadow-2xs'
-              : 'bg-white border-slate-200 hover:border-slate-300'
-          }`}
-        >
-          <div className="flex items-center gap-1 text-[11px] sm:text-xs font-semibold text-slate-600 truncate">
-            <ClipboardCheck className="w-3 h-3 text-indigo-500 shrink-0" />
-            <span className="truncate">Total</span>
-          </div>
-          <div className="text-sm sm:text-base font-black text-slate-900 leading-tight mt-0.5">
-            {stats.total}
-          </div>
-        </button>
-      </div>
-
-      {/* Search Bar (Red-marked tabs removed, search kept clean) */}
-      <div className="bg-white rounded-2xl border border-slate-200 p-3 shadow-2xs">
-        <div className="relative">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+      {/* 2. FILTER ROW: Search box + single horizontal scroll row of Status | Type chips */}
+      <div className="bg-white rounded-2xl border border-slate-200 p-2.5 space-y-2 shadow-2xs">
+        <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-50 border border-slate-200">
+          <Search className="w-4 h-4 text-slate-400 shrink-0" />
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search audit requests by item, recipe, customer, supplier, or submitter..."
-            className="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            placeholder="Search requests"
+            className="flex-1 min-w-0 bg-transparent text-sm outline-none text-slate-900 placeholder:text-slate-400"
           />
           {searchQuery && (
             <button
+              type="button"
               onClick={() => setSearchQuery('')}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400 hover:text-slate-600"
+              aria-label="Clear search"
+              className="text-slate-400 hover:text-slate-700 cursor-pointer shrink-0"
             >
-              Clear
+              <X className="w-4 h-4" />
             </button>
           )}
         </div>
+
+        <div className="relative">
+          <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pr-6">
+            {(
+              [
+                ['all', 'All'],
+                ['pending', `Pending (${stats.pending})`],
+                ['approved', 'Approved'],
+                ['rejected', 'Rejected'],
+              ] as ['all' | AuditRequestStatus, string][]
+            ).map(([statusId, label]) => (
+              <button
+                key={statusId}
+                type="button"
+                onClick={() => setActiveStatusTab(statusId)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap cursor-pointer shrink-0 transition ${
+                  activeStatusTab === statusId
+                    ? statusId === 'pending'
+                      ? 'bg-amber-500 text-white'
+                      : 'bg-slate-900 text-white'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200/70'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+
+            <div className="h-4 w-px bg-slate-200 mx-0.5 shrink-0" aria-hidden />
+
+            {(
+              [
+                ['production', 'Production'],
+                ['dispatch', 'Dispatch'],
+                ['raw_material_in', 'Material In'],
+              ] as [AuditRequestType, string][]
+            ).map(([typeId, label]) => {
+              const active = filterType === typeId;
+              return (
+                <button
+                  key={typeId}
+                  type="button"
+                  onClick={() => setFilterType(active ? 'all' : typeId)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap cursor-pointer shrink-0 transition ${
+                    active
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200/70'
+                  }`}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-y-0 right-0 w-6 bg-gradient-to-l from-white to-transparent"
+          />
+        </div>
       </div>
 
-      {/* Requests List */}
+      {/* 3 & 4. REQUESTS LIST (Pending Cards + Day-Grouped Resolved Rows) */}
       <div className="space-y-3">
         {filteredRequests.length === 0 ? (
           <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center shadow-2xs">
@@ -567,317 +893,182 @@ export const AuditReportView: React.FC = () => {
             <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
               There are no {activeStatusTab !== 'all' ? activeStatusTab : ''} requests matching your selected filters.
             </p>
-            {permissions.canSubmitAuditRequests && (
-              <button
-                onClick={() => setIsModalOpen(true)}
-                className="mt-4 inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 shadow-2xs cursor-pointer"
-              >
-                <Plus className="w-4 h-4" />
-                <span>Submit a Request</span>
-              </button>
-            )}
           </div>
         ) : (
-          filteredRequests.map((req) => {
-            const isPending = req.status === 'pending';
-            const isApproved = req.status === 'approved';
-            const isRejected = req.status === 'rejected';
+          <>
+            {/* PENDING REQUESTS = A1 CARDS, NEWEST FIRST */}
+            {pendingRequests.length > 0 && (
+              <div className="space-y-3">
+                {pendingRequests.map((req) => {
+                  const isExpanded = expandedId === req.id;
+                  const timeText = formatCardTime(req.submittedAt, todayKey, yesterdayKey);
+                  const stockChangeText = formatStockChangeSummary(req, permissions.canViewCostPerUnit);
 
-            return (
-              <div
-                key={req.id}
-                className={`bg-white rounded-2xl border transition shadow-2xs overflow-hidden ${
-                  isPending
-                    ? 'border-amber-200 hover:border-amber-300'
-                    : isApproved
-                    ? 'border-slate-200'
-                    : 'border-rose-100'
-                }`}
-              >
-                <div className="p-4 sm:p-5">
-                  <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
-                    {/* Left: Type Badge & Title */}
-                    <div className="space-y-1.5">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        {/* Type Badge */}
-                        {req.type === 'production' && (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg text-[11px] font-bold bg-purple-50 text-purple-700 border border-purple-200">
-                            <Boxes className="w-3 h-3" />
-                            Production Run
-                          </span>
-                        )}
-                        {req.type === 'dispatch' && (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg text-[11px] font-bold bg-sky-50 text-sky-700 border border-sky-200">
-                            <Truck className="w-3 h-3" />
-                            Finished Dispatch
-                          </span>
-                        )}
-                        {req.type === 'raw_material_in' && (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg text-[11px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                            <PackagePlus className="w-3 h-3" />
-                            Raw Material In
-                          </span>
-                        )}
+                  return (
+                    <div
+                      key={req.id}
+                      onClick={() => setExpandedId(isExpanded ? null : req.id)}
+                      className="bg-white rounded-2xl border border-amber-200 hover:border-amber-300 p-3.5 sm:p-4 shadow-2xs transition cursor-pointer"
+                    >
+                      {/* Top row: Icon + Title + Submitter/time + Amber Pending chip */}
+                      <div className="flex items-start justify-between gap-2.5">
+                        <div className="flex items-start gap-2.5 min-w-0 flex-1">
+                          {renderTypeIcon(req.type, 'md')}
+                          <div className="min-w-0 flex-1">
+                            <h3 className="text-sm font-bold text-slate-900 line-clamp-2 break-words leading-snug">
+                              {req.title}
+                            </h3>
+                            <p className="text-[11px] text-slate-500 line-clamp-2 break-words mt-0.5">
+                              {resolveDisplayName(req.submittedBy, req.submittedByRole)} · {timeText}
+                            </p>
+                          </div>
+                        </div>
 
-                        {/* Status Badge */}
-                        {isPending && (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg text-[11px] font-bold bg-amber-50 text-amber-700 border border-amber-300">
-                            <Clock className="w-3 h-3" />
-                            Pending Audit
-                          </span>
-                        )}
-                        {isApproved && (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg text-[11px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                            <CheckCircle2 className="w-3 h-3" />
-                            Approved & Taken Into Account
-                          </span>
-                        )}
-                        {isRejected && (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg text-[11px] font-bold bg-rose-50 text-rose-700 border border-rose-200">
-                            <XCircle className="w-3 h-3" />
-                            Audit Rejected
-                          </span>
-                        )}
-
-                        <span className="text-[10px] text-slate-400 font-mono">
-                          ID: {req.id.slice(-8)}
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200 shrink-0">
+                          Pending
                         </span>
                       </div>
 
-                      <h3 className="text-base font-bold text-slate-900">{req.title}</h3>
-
-                      <div className="flex items-center gap-3 text-xs text-slate-500 flex-wrap">
-                        <span className="inline-flex items-center gap-1">
-                          <User className="w-3 h-3 text-slate-400" />
-                          <span>Submitted by: </span>
-                          <strong className="text-slate-700">{req.submittedBy}</strong>
-                          {req.submittedByRole && (
-                            <span className="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.2 rounded capitalize">
-                              {req.submittedByRole}
-                            </span>
-                          )}
-                        </span>
-                        <span>•</span>
-                        <span className="inline-flex items-center gap-1">
-                          <Calendar className="w-3 h-3 text-slate-400" />
-                          <span>{new Date(req.submittedAt).toLocaleString()}</span>
-                        </span>
+                      {/* Dashed light box: Stock change */}
+                      <div className="mt-2.5 px-3 py-2 rounded-xl border border-dashed border-slate-300 bg-slate-50/70 text-xs text-slate-700 line-clamp-2 break-words">
+                        <span className="font-semibold text-slate-500">Stock change: </span>
+                        <span className="font-medium text-slate-800">{stockChangeText}</span>
                       </div>
+
+                      {/* Action Buttons OR Waiting for approval */}
+                      <div className="mt-3">
+                        {permissions.canAuditRequests ? (
+                          <div className="grid grid-cols-2 gap-2">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedAuditRequest(req);
+                                setAuditAction('reject');
+                                setAuditNotesInput('');
+                              }}
+                              className="py-2.5 px-3 rounded-xl border border-rose-300 bg-white hover:bg-rose-50 text-rose-700 text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 transition cursor-pointer active:scale-98"
+                            >
+                              <X className="w-4 h-4 shrink-0" />
+                              <span>Reject</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedAuditRequest(req);
+                                setAuditAction('approve');
+                                setAuditNotesInput('');
+                              }}
+                              className="py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 shadow-2xs transition cursor-pointer active:scale-98"
+                            >
+                              <Check className="w-4 h-4 shrink-0" />
+                              <span>Approve</span>
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="text-[11px] font-medium text-slate-400">
+                            Waiting for approval
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Tap on card (not buttons) expands existing full detail */}
+                      {isExpanded && renderExpandedDetail(req)}
                     </div>
+                  );
+                })}
 
-                    {/* Right: Actions */}
-                    <div className="flex items-center gap-2 pt-2 sm:pt-0 self-end sm:self-auto">
-                      {isPending && (
-                        <>
-                          {permissions.canAuditRequests ? (
-                            <>
-                              <button
-                                onClick={() => {
-                                  setSelectedAuditRequest(req);
-                                  setAuditAction('approve');
-                                  setAuditNotesInput('');
-                                }}
-                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 shadow-2xs transition cursor-pointer"
-                              >
-                                <CheckCircle2 className="w-3.5 h-3.5" />
-                                <span>Approve & Take into Account</span>
-                              </button>
-
-                              <button
-                                onClick={() => {
-                                  setSelectedAuditRequest(req);
-                                  setAuditAction('reject');
-                                  setAuditNotesInput('');
-                                }}
-                                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl text-xs font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 transition cursor-pointer"
-                              >
-                                <XCircle className="w-3.5 h-3.5 text-rose-600" />
-                                <span>Reject</span>
-                              </button>
-
-                               <button
-                                onClick={() => setRequestToDelete(req)}
-                                className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg hover:bg-rose-50 transition cursor-pointer"
-                                title="Delete record"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            </>
-                          ) : (
-                            <span className="text-[11px] font-semibold text-amber-700 bg-amber-50 px-2.5 py-1 rounded-lg border border-amber-200 flex items-center gap-1">
-                              <Info className="w-3 h-3" />
-                              Awaiting Auditor Approval
-                            </span>
-                          )}
-                        </>
-                      )}
-
-                      {!isPending && permissions.canAuditRequests && (
-                        <button
-                          onClick={() => setRequestToDelete(req)}
-                          className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg hover:bg-rose-50 transition cursor-pointer ml-auto"
-                          title="Delete record"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Detail Breakdown Box */}
-                  <div className="mt-3 p-3.5 bg-slate-50/80 rounded-xl border border-slate-100 text-xs text-slate-700 space-y-2">
-                    {/* Production Run Details */}
-                    {req.type === 'production' && (
-                      <div className="space-y-1.5">
-                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
-                          <div>
-                            <span className="text-slate-400 block">Recipe</span>
-                            <span className="font-bold text-slate-800">{req.recipeName}</span>
-                          </div>
-                          <div>
-                            <span className="text-slate-400 block">Batch Multiplier</span>
-                            <span className="font-bold text-slate-800">{req.batchMultiplier}x Batch</span>
-                          </div>
-                          <div>
-                            <span className="text-slate-400 block">Expected Yield</span>
-                            <span className="font-bold text-emerald-700">
-                              +{req.expectedYield} {req.unit} ({req.finishedItemName})
-                            </span>
-                          </div>
-                          <div>
-                            <span className="text-slate-400 block">Status Impact</span>
-                            <span className="font-bold text-slate-600">
-                              {isApproved ? 'Stock Deducted & Added' : 'Pending Verification'}
-                            </span>
-                          </div>
-                        </div>
-
-                        {req.materialsNeeded && req.materialsNeeded.length > 0 && (
-                          <div className="pt-2 border-t border-slate-200">
-                            <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1">
-                              Raw Materials to Deduct Upon Approval:
-                            </span>
-                            <div className="flex flex-wrap gap-1.5">
-                              {req.materialsNeeded.map((mat) => (
-                                <span
-                                  key={mat.rawItemId}
-                                  className="text-[11px] bg-white border border-slate-200 text-slate-700 px-2 py-0.5 rounded-md"
-                                >
-                                  <strong>{mat.rawItemName}:</strong> {mat.quantity} {mat.unit}
-                                </span>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    {/* Dispatch Details */}
-                    {req.type === 'dispatch' && (
-                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-[11px]">
-                        <div>
-                          <span className="text-slate-400 block">Dispatched Good</span>
-                          <span className="font-bold text-slate-800">{req.dispatchItemName}</span>
-                        </div>
-                        <div>
-                          <span className="text-slate-400 block">Quantity Deducted</span>
-                          <span className="font-bold text-sky-700">
-                            -{req.dispatchQuantity} {req.dispatchUnit}
-                          </span>
-                        </div>
-                        <div>
-                          <span className="text-slate-400 block">Customer / Destination</span>
-                          <span className="font-bold text-slate-800">
-                            {req.customerOrDestination || 'Internal Facility'}
-                          </span>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Raw Material In Details */}
-                    {req.type === 'raw_material_in' && (
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
-                        <div>
-                          <span className="text-slate-400 block">Raw Material</span>
-                          <span className="font-bold text-slate-800">{req.rawItemName}</span>
-                        </div>
-                        <div>
-                          <span className="text-slate-400 block">Quantity Received</span>
-                          <span className="font-bold text-emerald-700">
-                            +{req.rawQuantity} {req.rawUnit}
-                          </span>
-                        </div>
-                        <div>
-                          <span className="text-slate-400 block">Supplier</span>
-                          <span className="font-bold text-slate-800">{req.supplierName || 'Standard Vendor'}</span>
-                        </div>
-                        {permissions.canViewCostPerUnit && req.unitPurchaseCost !== undefined && (
-                          <div>
-                            <span className="text-slate-400 block">Unit Cost</span>
-                            <span className="font-bold text-teal-700">
-                              ₹{req.unitPurchaseCost.toFixed(2)} / {req.rawUnit}
-                            </span>
-                          </div>
-                        )}
-                        {req.shelfLocation && (
-                          <div>
-                            <span className="text-slate-400 block">Shelf / Bin</span>
-                            <span className="font-bold text-slate-700">{req.shelfLocation}</span>
-                          </div>
-                        )}
-                        {req.batchNumber && (
-                          <div>
-                            <span className="text-slate-400 block">Lot / Batch #</span>
-                            <span className="font-mono text-slate-700">{req.batchNumber}</span>
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    {/* Notes from submitter */}
-                    {req.notes && (
-                      <div className="pt-2 border-t border-slate-200 text-[11px]">
-                        <span className="text-slate-400 block font-semibold">Submitter Notes:</span>
-                        <p className="text-slate-600 italic">"{req.notes}"</p>
-                      </div>
-                    )}
-
-                    {/* Audit Resolution Remarks (If resolved) */}
-                    {(req.auditedBy || req.auditNotes || req.executionError) && (
-                      <div
-                        className={`pt-2 border-t text-[11px] rounded-lg p-2.5 mt-2 ${
-                          isApproved
-                            ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
-                            : 'bg-rose-50 border-rose-200 text-rose-900'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between font-bold text-[11px] mb-1">
-                          <span>
-                            {isApproved ? '✓ Audited & Approved' : '✗ Audit Rejected'} by {req.auditedBy}
-                          </span>
-                          {req.auditedAt && (
-                            <span className="font-normal text-[10px] opacity-80">
-                              {new Date(req.auditedAt).toLocaleString()}
-                            </span>
-                          )}
-                        </div>
-                        {req.auditNotes && (
-                          <p className="text-[11px] italic">Remarks: "{req.auditNotes}"</p>
-                        )}
-                        {req.executionError && (
-                          <p className="text-[11px] font-bold text-rose-700 mt-1">
-                            Execution note: {req.executionError}
-                          </p>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                </div>
+                {activeStatusTab === 'pending' && (
+                  <p className="text-center text-xs text-slate-400 pt-1">All caught up ✓</p>
+                )}
               </div>
-            );
-          })
+            )}
+
+            {/* APPROVED / REJECTED / ALL (non-pending items) = COMPACT ONE-LINE ROWS GROUPED BY DAY */}
+            {resolvedDayGroups.length > 0 && (
+              <div className="space-y-3">
+                {resolvedDayGroups.map((grp) => (
+                  <div
+                    key={grp.dayKey}
+                    className="bg-white rounded-2xl border border-slate-200 overflow-x-clip shadow-2xs"
+                  >
+                    {/* Sticky Day Header */}
+                    <div
+                      style={{ top: 'calc(4rem + env(safe-area-inset-top))' }}
+                      className="sticky z-10 px-3.5 py-2 rounded-t-2xl bg-slate-100/95 backdrop-blur-xs border-b border-slate-200 text-[11px] font-bold tracking-wide text-slate-600"
+                    >
+                      {grp.label} · {grp.items.length} {grp.items.length === 1 ? 'request' : 'requests'}
+                    </div>
+
+                    <div className="divide-y divide-slate-100 rounded-b-2xl overflow-hidden">
+                      {grp.items.map((req) => {
+                        const isApproved = req.status === 'approved';
+                        const isRejected = req.status === 'rejected';
+                        const isExpanded = expandedId === req.id;
+
+                        return (
+                          <div
+                            key={req.id}
+                            onClick={() => setExpandedId(isExpanded ? null : req.id)}
+                            className="px-3.5 py-2.5 hover:bg-slate-50/70 transition cursor-pointer"
+                          >
+                            <div className="flex items-center justify-between gap-2.5">
+                              <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                                {renderTypeIcon(req.type, 'sm')}
+                                <div className="min-w-0 flex-1">
+                                  <div className="text-xs sm:text-sm font-bold text-slate-900 line-clamp-2 break-words">
+                                    {req.title}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500 line-clamp-2 break-words mt-0.5">
+                                    {resolveDisplayName(req.submittedBy, req.submittedByRole)}
+                                    {req.auditedBy ? ` · by ${resolveDisplayName(req.auditedBy)}` : ''}
+                                  </div>
+                                </div>
+                              </div>
+
+                              <span
+                                className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border shrink-0 ${
+                                  isApproved
+                                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                    : 'bg-rose-50 text-rose-700 border-rose-200'
+                                }`}
+                              >
+                                {isApproved ? 'Approved' : 'Rejected'}
+                              </span>
+                            </div>
+
+                            {isRejected && req.auditNotes && (
+                              <div className="pl-[42px] mt-1 text-[11px] font-medium text-rose-600 line-clamp-2 break-words">
+                                Reason: {req.auditNotes}
+                              </div>
+                            )}
+
+                            {isExpanded && renderExpandedDetail(req)}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
         )}
       </div>
+
+      {/* 5. FLOATING "+ New request" BUTTON bottom-right */}
+      {permissions.canSubmitAuditRequests && (
+        <button
+          type="button"
+          onClick={() => setIsModalOpen(true)}
+          style={{ bottom: 'calc(1.25rem + env(safe-area-inset-bottom))' }}
+          className="fixed right-4 z-30 inline-flex items-center gap-1.5 px-4 py-2.5 rounded-full text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white shadow-lg cursor-pointer active:scale-95 transition"
+        >
+          <Plus className="w-4 h-4" />
+          <span>New request</span>
+        </button>
+      )}
 
       {/* ========================================================================= */}
       {/* MODAL 1: ENTER NEW AUDIT REQUEST (Production / Dispatch / Raw Material In) */}
@@ -943,21 +1134,21 @@ export const AuditReportView: React.FC = () => {
                 <div className="space-y-3">
                   <div>
                     <label className="block text-xs font-bold text-slate-700 mb-1">
-                      Select Recipe / Formula *
+                      Select BOM *
                     </label>
                     <select
                       value={prodRecipeId}
                       onChange={(e) => setProdRecipeId(e.target.value)}
                       required
-                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      className="w-full h-[38px] px-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
                     >
-                      <option value="">-- Choose Recipe to Produce --</option>
+                      <option value="">-- Choose BOM to Produce --</option>
                       {recipes.map((rec) => {
                         const targetItem = items.find((i) => i.id === rec.finishedItemId);
                         const unit = targetItem?.unit || 'units';
                         return (
                           <option key={rec.id} value={rec.id}>
-                            {rec.name} (Yield: {rec.yieldQuantity} {unit} of {rec.finishedItemName})
+                            {rec.name} (Yield: {formatQty(rec.yieldQuantity, unit)} {unit} of {rec.finishedItemName})
                           </option>
                         );
                       })}
@@ -994,7 +1185,7 @@ export const AuditReportView: React.FC = () => {
                         </span>
                       </div>
                       <div className="text-[11px] text-slate-600">
-                        <strong className="block text-slate-700 mb-0.5">Ingredients to deduct on approval:</strong>
+                        <strong className="block text-slate-700 mb-0.5">Materials to deduct on approval:</strong>
                         <ul className="list-disc pl-4 space-y-0.5">
                           {selectedRecipe.ingredients.map((ing) => (
                             <li key={ing.rawItemId}>
@@ -1032,12 +1223,12 @@ export const AuditReportView: React.FC = () => {
                       value={dispatchItemId}
                       onChange={(e) => setDispatchItemId(e.target.value)}
                       required
-                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      className="w-full h-[38px] px-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
                     >
                       <option value="">-- Choose Item to Dispatch --</option>
                       {items.map((it) => (
                         <option key={it.id} value={it.id}>
-                          {it.name} (Current Stock: {it.quantity} {it.unit} | {it.type.replace('_', ' ')})
+                          {it.name} (Current Stock: {formatQty(it.quantity, it.unit)} {it.unit} | {it.type.replace('_', ' ')})
                         </option>
                       ))}
                     </select>
@@ -1116,7 +1307,7 @@ export const AuditReportView: React.FC = () => {
                         }
                       }}
                       required
-                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      className="w-full h-[38px] px-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
                     >
                       <option value="">-- Choose Raw Material --</option>
                       {items
@@ -1124,7 +1315,7 @@ export const AuditReportView: React.FC = () => {
                         .concat(items.filter((it) => it.type !== 'raw_material'))
                         .map((it) => (
                           <option key={it.id} value={it.id}>
-                            {it.name} ({it.type.replace('_', ' ')}) — Current: {it.quantity} {it.unit}
+                            {it.name} ({it.type.replace('_', ' ')}) — Current: {formatQty(it.quantity, it.unit)} {it.unit}
                           </option>
                         ))}
                     </select>
@@ -1154,7 +1345,7 @@ export const AuditReportView: React.FC = () => {
                         type="text"
                         value={rawSupplier}
                         onChange={(e) => setRawSupplier(e.target.value)}
-                        placeholder="e.g. Apex Ingredients Ltd"
+                        placeholder="e.g. Bharat Lead Metals Ltd"
                         className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
                       />
                     </div>
@@ -1292,8 +1483,8 @@ export const AuditReportView: React.FC = () => {
                   {selectedAuditRequest.title}
                 </span>
                 <span className="text-[11px] text-slate-500 block mt-1">
-                  Submitted by {selectedAuditRequest.submittedBy} on{' '}
-                  {new Date(selectedAuditRequest.submittedAt).toLocaleDateString()}
+                  Submitted by {resolveDisplayName(selectedAuditRequest.submittedBy, selectedAuditRequest.submittedByRole)} on{' '}
+                  {formatShortDateTime(selectedAuditRequest.submittedAt)}
                 </span>
               </div>
 

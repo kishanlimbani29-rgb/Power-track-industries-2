@@ -1,4 +1,4 @@
-export type ItemType = 'raw_material' | 'semi_finished' | 'finished_good' | 'both';
+export type ItemType = 'raw_material' | 'semi_finished' | 'finished_good' | 'both' | 'non_stock';
 
 export type UserRole = 'admin' | 'manager' | 'staff' | 'viewer' | (string & {});
 
@@ -35,10 +35,19 @@ export interface InventoryItem {
   sellingPrice: number; // Retail selling price (for finished goods)
   supplier?: string;
   location?: string;
+  photoThumb?: string | null; // 160px JPEG thumbnail dataURL
+  photoUpdatedAt?: string;
   notes?: string;
   createdAt: string;
   updatedAt: string;
   lastUpdatedBy?: string;
+}
+
+export interface ItemPhoto {
+  id?: string; // itemId
+  dataUrl: string; // Max 1000px high-res JPEG dataURL (< 300 KB)
+  updatedAt: string;
+  updatedBy: string;
 }
 
 export interface IngredientRequirement {
@@ -83,6 +92,7 @@ export interface StockMovement {
   performedBy?: string;
   performedByName?: string;
   timestamp: string;
+  pending?: boolean; // In-memory UI flag only — never written to Firestore
 }
 
 export interface DeductedMaterial {
@@ -170,6 +180,8 @@ export interface AuditRequest {
   executionError?: string;
 }
 
+export type ChangeWindow = '15m' | '1h' | '2h' | 'eod' | '24h' | 'none';
+
 export interface RolePermissions {
   canEditItems: boolean;
   canDeleteItems: boolean;
@@ -192,10 +204,12 @@ export interface RolePermissions {
   canManageUsers: boolean;
   // Sales & Purchase
   canViewSalesOption: boolean; // View Sales menu in shelf
-  canCreateSales: boolean; // Create sales, change status, cancel
+  canCreateSales: boolean; // Create sales, cancel
   canEditSales: boolean; // Edit sale invoices (customer, items, quantities, rates, notes)
   canDeleteSales: boolean; // Delete sale invoices and return stock to inventory
   canRecordPayments: boolean; // Record customer payments & refunds
+  canEditPayments: boolean; // Edit customer payment & advance entries
+  canDeletePayments: boolean; // Remove customer payment & advance entries
   canCreateSalesReturn: boolean; // Record sales returns (credit notes)
   canEditSalesReturn: boolean; // Edit sales return details and quantities
   canDeleteSalesReturn: boolean; // Delete sales return (reverses stock restoration)
@@ -208,6 +222,9 @@ export interface RolePermissions {
   canCreatePurchaseReturn: boolean; // Return goods to supplier (debit notes)
   canEditPurchaseReturn: boolean; // Edit purchase return details and quantities
   canDeletePurchaseReturn: boolean; // Delete purchase return (reverses stock deduction)
+  // Time limit for changes
+  changeWindow: ChangeWindow;
+  canChangeOthersEntries: boolean;
 }
 
 export const TRADE_PERMISSION_KEYS = [
@@ -216,6 +233,8 @@ export const TRADE_PERMISSION_KEYS = [
   'canEditSales',
   'canDeleteSales',
   'canRecordPayments',
+  'canEditPayments',
+  'canDeletePayments',
   'canCreateSalesReturn',
   'canEditSalesReturn',
   'canDeleteSalesReturn',
@@ -239,6 +258,8 @@ export const tradePermissions = (value: boolean): Pick<RolePermissions, TradePer
   canEditSales: value,
   canDeleteSales: value,
   canRecordPayments: value,
+  canEditPayments: value,
+  canDeletePayments: value,
   canCreateSalesReturn: value,
   canEditSalesReturn: value,
   canDeleteSalesReturn: value,
@@ -275,6 +296,8 @@ export const ROLE_PERMISSIONS: Record<UserRole, RolePermissions> = {
     canAuditRequests: true,
     canManageUsers: true,
     ...tradePermissions(true),
+    changeWindow: 'none',
+    canChangeOthersEntries: true,
   },
   manager: {
     canEditItems: true,
@@ -297,6 +320,8 @@ export const ROLE_PERMISSIONS: Record<UserRole, RolePermissions> = {
     canAuditRequests: true,
     canManageUsers: false,
     ...tradePermissions(true),
+    changeWindow: 'none',
+    canChangeOthersEntries: true,
   },
   staff: {
     canEditItems: false,
@@ -321,6 +346,8 @@ export const ROLE_PERMISSIONS: Record<UserRole, RolePermissions> = {
     ...tradePermissions(false),
     canViewPurchaseOption: true,
     canReceivePurchase: true,
+    changeWindow: '2h',
+    canChangeOthersEntries: false,
   },
   viewer: {
     canEditItems: false,
@@ -343,8 +370,63 @@ export const ROLE_PERMISSIONS: Record<UserRole, RolePermissions> = {
     canAuditRequests: false,
     canManageUsers: false,
     ...tradePermissions(false),
+    changeWindow: '15m',
+    canChangeOthersEntries: false,
   },
 };
+
+export const VALID_CHANGE_WINDOWS: ChangeWindow[] = ['15m', '1h', '2h', 'eod', '24h', 'none'];
+
+export type BooleanPermissionKey = Exclude<keyof RolePermissions, 'changeWindow'>;
+
+export const BOOLEAN_PERMISSION_KEYS = (
+  Object.keys(ROLE_PERMISSIONS.admin) as (keyof RolePermissions)[]
+).filter((k): k is BooleanPermissionKey => k !== 'changeWindow');
+
+export const ALL_PERMISSION_KEYS = BOOLEAN_PERMISSION_KEYS;
+
+export function resolveRolePermissions(
+  roleId: string,
+  savedPermissionsMap?: Record<string, Partial<RolePermissions> | undefined> | null,
+  customRoles?: RoleDefinition[]
+): RolePermissions {
+  if (roleId === 'admin') {
+    return { ...ROLE_PERMISSIONS.admin };
+  }
+
+  const builtInDefaults = ROLE_PERMISSIONS[roleId as keyof typeof ROLE_PERMISSIONS];
+  const customDef = customRoles?.find((r) => r.id === roleId);
+  const saved = savedPermissionsMap?.[roleId];
+
+  const resolved = {} as RolePermissions;
+  for (const key of BOOLEAN_PERMISSION_KEYS) {
+    const savedVal = saved?.[key];
+    if (typeof savedVal === 'boolean') {
+      resolved[key] = savedVal;
+      continue;
+    }
+    const customVal = customDef?.permissions?.[key];
+    if (typeof customVal === 'boolean') {
+      resolved[key] = customVal;
+      continue;
+    }
+    const defaultVal = builtInDefaults?.[key];
+    resolved[key] = typeof defaultVal === 'boolean' ? defaultVal : false;
+  }
+
+  const savedWin = saved?.changeWindow;
+  const customWin = customDef?.permissions?.changeWindow;
+  const defaultWin = builtInDefaults?.changeWindow;
+  resolved.changeWindow = VALID_CHANGE_WINDOWS.includes(savedWin as ChangeWindow)
+    ? (savedWin as ChangeWindow)
+    : VALID_CHANGE_WINDOWS.includes(customWin as ChangeWindow)
+    ? (customWin as ChangeWindow)
+    : VALID_CHANGE_WINDOWS.includes(defaultWin as ChangeWindow)
+    ? (defaultWin as ChangeWindow)
+    : '2h';
+
+  return resolved;
+}
 
 export interface RoleDefinition {
   id: string;
@@ -360,7 +442,7 @@ export const DEFAULT_ROLE_DEFINITIONS: RoleDefinition[] = [
   {
     id: 'admin',
     title: 'Administrator / Owner',
-    desc: 'Complete control: item catalog, recipe formulas, costs, margins, and user role assignments.',
+    desc: 'Complete control: item catalog, BOMs, costs, margins, and user role assignments.',
     badge: 'bg-emerald-100 text-emerald-800 border-emerald-200',
     color: 'emerald',
     isSystem: true,
@@ -369,7 +451,7 @@ export const DEFAULT_ROLE_DEFINITIONS: RoleDefinition[] = [
   {
     id: 'manager',
     title: 'Production & Inventory Manager',
-    desc: 'Can create items, build recipes, execute batch runs, adjust stock, and review reports.',
+    desc: 'Can create items, build BOMs, execute batch runs, adjust stock, and review reports.',
     badge: 'bg-indigo-100 text-indigo-800 border-indigo-200',
     color: 'indigo',
     isSystem: true,
@@ -377,8 +459,8 @@ export const DEFAULT_ROLE_DEFINITIONS: RoleDefinition[] = [
   },
   {
     id: 'staff',
-    title: 'Kitchen & Floor Staff',
-    desc: 'Can execute recipe production batches, record stock in/out, and check inventory levels.',
+    title: 'Production Staff',
+    desc: 'Can execute BOM production batches, record stock in/out, and check inventory levels.',
     badge: 'bg-amber-100 text-amber-800 border-amber-200',
     color: 'amber',
     isSystem: true,
@@ -400,7 +482,7 @@ export const DEFAULT_ROLE_DEFINITIONS: RoleDefinition[] = [
 // SALES & PURCHASE
 // =========================================================================
 
-export type PaymentMode = 'cash' | 'upi' | 'bank' | 'cheque' | 'other';
+export type PaymentMode = 'cash' | 'upi' | 'bank' | 'cheque' | 'advance' | 'other';
 export type PaymentStatus = 'unpaid' | 'partly_paid' | 'paid' | 'refund_due';
 export type ReturnStatus = 'none' | 'partly_returned' | 'fully_returned';
 
@@ -410,9 +492,33 @@ export interface PaymentEntry {
   date: string; // yyyy-mm-dd
   mode: PaymentMode;
   note?: string;
+  advanceId?: string;
   recordedBy: string;
   recordedByName?: string;
   recordedAt: string;
+}
+
+export interface CustomerAdvanceUse {
+  saleId: string;
+  invoiceNumber: string;
+  amount: number;
+  date: string;
+}
+
+export interface CustomerAdvance {
+  id: string;
+  partyKey: string;
+  partyName: string;
+  partyPhone?: string;
+  amount: number;
+  remaining: number;
+  mode: PaymentMode;
+  date: string; // yyyy-mm-dd
+  note?: string;
+  uses: CustomerAdvanceUse[];
+  createdAt: string;
+  createdBy: string;
+  createdByName?: string;
 }
 
 export interface PartyInfo {
@@ -500,6 +606,34 @@ export interface SalesReturn {
   createdBy: string;
   createdByName?: string;
   createdAt: string;
+}
+
+export type BatteryCheckStatus =
+  | 'checking'
+  | 'ok_returned'
+  | 'replaced'
+  | 'repaired_returned'
+  | 'taken_back';
+
+export interface BatteryCheck {
+  id: string;
+  partyName: string;
+  partyPhone: string;
+  itemId: string;
+  itemName: string;
+  quantity: number;
+  serial?: string;
+  problem: string;
+  receivedAt: string;
+  status: BatteryCheckStatus;
+  resultNote?: string;
+  resolvedAt?: string;
+  resolvedBy?: string;
+  resolvedByName?: string;
+  linkedSaleIds?: string[];
+  creditAmount?: number;
+  createdBy: string;
+  createdByName?: string;
 }
 
 export interface PurchaseLine {

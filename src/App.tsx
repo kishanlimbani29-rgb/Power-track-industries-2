@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
-import { InventoryProvider } from './context/InventoryContext';
+import { InventoryProvider, useInventory } from './context/InventoryContext';
 import { Sidebar } from './components/Sidebar';
 import { Header } from './components/Header';
 import { ActiveTab } from './components/Navigation';
@@ -11,7 +11,6 @@ import { AnalyticsView } from './components/AnalyticsView';
 import { MovementsView } from './components/MovementsView';
 import { TeamView } from './components/TeamView';
 import { ItemModal } from './components/ItemModal';
-import { RecipeModal } from './components/RecipeModal';
 import { StockAdjustModal } from './components/StockAdjustModal';
 import { DeviceShareModal } from './components/DeviceShareModal';
 import { ExcelImportModal } from './components/ExcelImportModal';
@@ -23,18 +22,18 @@ import { TradeProvider } from './context/TradeContext';
 import { SalesView } from './components/trade/SalesView';
 import { PurchaseView } from './components/trade/PurchaseView';
 import { InventoryItem, Recipe } from './types/inventory';
-import { CheckCircle2, FileSpreadsheet, Eye, LogOut } from 'lucide-react';
+import { CheckCircle2, FileSpreadsheet, Eye, LogOut, Loader2, AlertTriangle, X } from 'lucide-react';
 
 const TAB_TITLES: Record<ActiveTab, string> = {
-  inventory: 'Inventory & Stock Master',
-  recipes: 'Recipes & Bill of Materials (BOM)',
-  production: 'Batch Production & Manufacturing',
-  sales: 'Sales & Customer Invoices',
-  purchase: 'Purchase Orders & Suppliers',
-  audit: 'Audit Reports & Verification Queue',
-  analytics: 'Executive Analytics & Decision Reports',
-  movements: 'Stock Movement Audit Trail',
-  team: 'User Rights & Role Access Control',
+  inventory: 'Inventory & Stock',
+  recipes: 'Product BOM',
+  production: 'Batch Production',
+  sales: 'Sales',
+  purchase: 'Purchase',
+  audit: 'Audit Reports',
+  analytics: 'Analytics & Reports',
+  movements: 'Stock Movements',
+  team: 'Roles & Team',
 };
 
 function StodoApp() {
@@ -48,17 +47,17 @@ function StodoApp() {
     permissions,
     isTestingRole,
     role,
+    allRoles,
     exitSimulatedRole,
   } = useAuth();
+  const { actionToast, clearActionToast } = useInventory();
   const [activeTab, setActiveTab] = useState<ActiveTab>('inventory');
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
+  const [returnToAllRolesKey, setReturnToAllRolesKey] = useState(0);
 
   // Modal States
   const [isItemModalOpen, setIsItemModalOpen] = useState(false);
   const [itemToEdit, setItemToEdit] = useState<InventoryItem | null>(null);
-
-  const [isRecipeModalOpen, setIsRecipeModalOpen] = useState(false);
-  const [recipeToEdit, setRecipeToEdit] = useState<Recipe | null>(null);
 
   const [isProductionNewRunOpen, setIsProductionNewRunOpen] = useState(false);
   const [produceRecipe, setProduceRecipe] = useState<Recipe | null>(null);
@@ -136,7 +135,6 @@ function StodoApp() {
   // preventing premature closes when switching between sidebar and dialogs.
   const isAnyModalOpen = Boolean(
     isItemModalOpen ||
-    isRecipeModalOpen ||
     isAdjustModalOpen ||
     isShareModalOpen ||
     isExcelImportModalOpen ||
@@ -155,7 +153,6 @@ function StodoApp() {
       const handlePopState = () => {
         modalHistoryPushedRef.current = false;
         setIsItemModalOpen(false);
-        setIsRecipeModalOpen(false);
         setIsAdjustModalOpen(false);
         setIsShareModalOpen(false);
         setIsExcelImportModalOpen(false);
@@ -178,6 +175,28 @@ function StodoApp() {
     }
   }, [isAnyModalOpen]);
 
+  useEffect(() => {
+    if (!isMobileSidebarOpen) return;
+
+    const y = window.scrollY;
+    document.body.style.position = 'fixed';
+    document.body.style.top = `-${y}px`;
+    document.body.style.left = '0';
+    document.body.style.right = '0';
+    document.body.style.width = '100%';
+    document.body.style.overflow = 'hidden';
+
+    return () => {
+      document.body.style.position = '';
+      document.body.style.top = '';
+      document.body.style.left = '';
+      document.body.style.right = '';
+      document.body.style.width = '';
+      document.body.style.overflow = '';
+      window.scrollTo(0, y);
+    };
+  }, [isMobileSidebarOpen]);
+
   const handleOpenAddItem = () => {
     setItemToEdit(null);
     setIsItemModalOpen(true);
@@ -191,16 +210,6 @@ function StodoApp() {
   const handleOpenAdjustStock = (item?: InventoryItem) => {
     setAdjustItem(item || null);
     setIsAdjustModalOpen(true);
-  };
-
-  const handleOpenAddRecipe = () => {
-    setRecipeToEdit(null);
-    setIsRecipeModalOpen(true);
-  };
-
-  const handleOpenEditRecipe = (recipe: Recipe) => {
-    setRecipeToEdit(recipe);
-    setIsRecipeModalOpen(true);
   };
 
   const handleOpenProduce = (recipe?: Recipe) => {
@@ -243,7 +252,6 @@ function StodoApp() {
         isOpenMobile={isMobileSidebarOpen}
         onCloseMobile={() => setIsMobileSidebarOpen(false)}
         onOpenShareModal={() => setIsShareModalOpen(true)}
-        onOpenInstallModal={() => setIsPWAInstallModalOpen(true)}
       />
 
       {/* Main Content Viewport */}
@@ -255,11 +263,28 @@ function StodoApp() {
               <span className="w-2.5 h-2.5 rounded-full bg-amber-900 animate-ping shrink-0" />
               <span className="font-extrabold uppercase tracking-wide">Admin Role Preview:</span>
               <span className="truncate">
-                Testing system as <strong className="font-extrabold underline">{role.toUpperCase()}</strong>. All capability gates reflect this persona.
+                Testing system as{' '}
+                <strong className="font-extrabold underline">
+                  {(role === 'admin'
+                    ? 'OWNER'
+                    : role === 'manager'
+                    ? 'MANAGER'
+                    : role === 'staff'
+                    ? 'STAFF'
+                    : role === 'viewer'
+                    ? 'VIEWER'
+                    : allRoles.find((r) => r.id === role)?.title || role
+                  ).toUpperCase()}
+                </strong>
+                . All capability gates reflect this persona.
               </span>
             </div>
             <button
-              onClick={exitSimulatedRole}
+              onClick={() => {
+                exitSimulatedRole();
+                setActiveTab('team');
+                setReturnToAllRolesKey((k) => k + 1);
+              }}
               className="px-3 py-1 rounded-lg bg-slate-900 text-white font-bold text-xs hover:bg-slate-800 transition shrink-0 cursor-pointer shadow-xs active:scale-95"
             >
               Exit Preview
@@ -269,7 +294,6 @@ function StodoApp() {
 
         {/* Top Header with title, mobile toggle, live sync & role switcher */}
         <Header
-          onOpenShareModal={() => setIsShareModalOpen(true)}
           onToggleSidebar={() => setIsMobileSidebarOpen((prev) => !prev)}
           activeTabTitle={TAB_TITLES[activeTab]}
         />
@@ -288,9 +312,6 @@ function StodoApp() {
 
           {activeTab === 'recipes' && permissions.canEditRecipes && (
             <RecipesView
-              onOpenAddRecipe={handleOpenAddRecipe}
-              onOpenEditRecipe={handleOpenEditRecipe}
-              onOpenProduce={handleOpenProduce}
               onOpenExcelImport={() => setIsRecipeExcelImportModalOpen(true)}
               onOpenAdjustStock={handleOpenAdjustStock}
               onOpenEditItem={handleOpenEditItem}
@@ -305,6 +326,7 @@ function StodoApp() {
                 setIsProductionNewRunOpen(false);
                 setProduceRecipe(null);
               }}
+              onNavigateToRecipes={() => setActiveTab('recipes')}
             />
           )}
 
@@ -329,7 +351,9 @@ function StodoApp() {
             <MovementsView onOpenAdjustStock={handleOpenAdjustStock} />
           )}
 
-          {activeTab === 'team' && permissions.canViewRolesAccessOption && <TeamView />}
+          {activeTab === 'team' && permissions.canViewRolesAccessOption && (
+            <TeamView returnToAllRolesKey={returnToAllRolesKey} />
+          )}
         </main>
 
 
@@ -341,12 +365,6 @@ function StodoApp() {
         onClose={() => setIsItemModalOpen(false)}
         itemToEdit={itemToEdit}
         onOpenAdjustStock={handleOpenAdjustStock}
-      />
-
-      <RecipeModal
-        isOpen={isRecipeModalOpen}
-        onClose={() => setIsRecipeModalOpen(false)}
-        recipeToEdit={recipeToEdit}
       />
 
       <StockAdjustModal
@@ -375,9 +393,46 @@ function StodoApp() {
         onClose={() => setIsPWAInstallModalOpen(false)}
       />
 
+      {/* Floating Action Status Toast */}
+      {actionToast && (
+        <div
+          key={actionToast.id}
+          role="status"
+          style={{ bottom: 'calc(1.25rem + env(safe-area-inset-bottom))' }}
+          className="fixed left-1/2 -translate-x-1/2 z-[70] w-[calc(100vw-2rem)] max-w-sm bg-slate-900 text-white px-4 py-3 rounded-2xl shadow-2xl border border-slate-700/60 flex items-center gap-3 animate-in fade-in slide-in-from-bottom-2 duration-150"
+        >
+          {actionToast.tone === 'saving' ? (
+            <Loader2 className="w-4 h-4 text-indigo-400 animate-spin shrink-0" />
+          ) : actionToast.tone === 'error' ? (
+            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          )}
+          <div className="min-w-0 flex-1">
+            <div className="text-xs font-bold truncate">{actionToast.title}</div>
+            {actionToast.message && (
+              <div className="text-[11px] text-slate-300 mt-0.5 line-clamp-2 break-words">
+                {actionToast.message}
+              </div>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={clearActionToast}
+            className="text-slate-400 hover:text-white p-0.5 shrink-0 cursor-pointer"
+            aria-label="Dismiss"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
       {/* Floating Download Feedback Toast */}
       {downloadToast && (
-        <div className="fixed bottom-5 right-5 z-50 max-w-sm w-[calc(100vw-2.5rem)] bg-slate-900 text-white px-4 py-3 rounded-2xl shadow-2xl border border-slate-700/60 flex items-center gap-3 animate-in fade-in slide-in-from-bottom-3 duration-200">
+        <div
+          style={{ bottom: 'calc(1.25rem + env(safe-area-inset-bottom))' }}
+          className="fixed right-5 z-50 max-w-sm w-[calc(100vw-2.5rem)] bg-slate-900 text-white px-4 py-3 rounded-2xl shadow-2xl border border-slate-700/60 flex items-center gap-3 animate-in fade-in slide-in-from-bottom-3 duration-200"
+        >
           <div className="w-8 h-8 rounded-xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center justify-center shrink-0">
             <FileSpreadsheet className="w-4 h-4" />
           </div>

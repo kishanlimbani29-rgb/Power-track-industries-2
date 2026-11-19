@@ -1,39 +1,133 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import {
   History,
   Search,
-  Download,
   ArrowDownRight,
   ArrowUpRight,
   Trash2,
   ClipboardCheck,
-  CookingPot,
+  ClipboardList,
   Sparkles,
   SlidersHorizontal,
-  TrendingUp,
-  TrendingDown,
-  Calendar,
-  Clock,
-  User,
   X,
-  Layers,
   ChevronRight,
+  ChevronDown,
   FileSpreadsheet,
 } from 'lucide-react';
 import { StockMovement, StockMovementType, InventoryItem } from '../types/inventory';
 import { useInventory } from '../context/InventoryContext';
 import { useAuth } from '../context/AuthContext';
 import { downloadExcelFile, downloadCSVFile } from '../utils/fileDownload';
+import { formatQty, formatDate as formatSharedDate, formatShortDate, formatDateTime, formatTime12h } from '../utils/numberFormat';
 
 interface MovementsViewProps {
   onOpenAdjustStock?: (item?: InventoryItem) => void;
 }
 
+type PeriodId = 'today' | '7d' | '30d' | 'all';
+type LedgerTab = 'all_entries' | 'by_item';
+
+const PERIOD_LABELS: Record<PeriodId, string> = {
+  today: 'Today',
+  '7d': '7 days',
+  '30d': '30 days',
+  all: 'All',
+};
+
+const toLocalDayKey = (iso?: string): string => {
+  const d = iso ? new Date(iso) : new Date();
+  if (Number.isNaN(d.getTime())) {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  }
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+const shiftDayKey = (daysOffset: number): string => {
+  const d = new Date();
+  d.setDate(d.getDate() + daysOffset);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+const getPeriodStartMs = (period: PeriodId): number | null => {
+  if (period === 'all') return null;
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+  if (period === 'today') return start.getTime();
+  if (period === '7d') {
+    start.setDate(start.getDate() - 6);
+    return start.getTime();
+  }
+  start.setDate(start.getDate() - 29);
+  return start.getTime();
+};
+
+const formatDayHeaderLabel = (dayKey: string, todayKey: string, yesterdayKey: string): string => {
+  if (dayKey === todayKey) return 'TODAY';
+  if (dayKey === yesterdayKey) return 'YESTERDAY';
+  const d = new Date(`${dayKey}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return dayKey.toUpperCase();
+  return formatShortDate(d, true).toUpperCase();
+};
+
+const formatQtyClean = (n: number, unit?: string): string => {
+  return formatQty(n, unit);
+};
+
 export const MovementsView: React.FC<MovementsViewProps> = ({ onOpenAdjustStock }) => {
   const { movements, items, hasMoreMovements, loadMoreMovements } = useInventory();
   const { permissions } = useAuth();
+
   const [search, setSearch] = useState('');
   const [selectedType, setSelectedType] = useState<string>('all');
+  const [period, setPeriod] = useState<PeriodId>('7d');
+  const [activeTab, setActiveTab] = useState<LedgerTab>('all_entries');
+  const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
+  const [detailMovement, setDetailMovement] = useState<StockMovement | null>(null);
+
+  const exportMenuRef = useRef<HTMLDivElement>(null);
+  const sheetHistoryPushedRef = useRef(false);
+
+  // Close Excel dropdown when clicking outside
+  useEffect(() => {
+    if (!isExportMenuOpen) return;
+    const handleOutside = (e: MouseEvent) => {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(e.target as Node)) {
+        setIsExportMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutside);
+    return () => document.removeEventListener('mousedown', handleOutside);
+  }, [isExportMenuOpen]);
+
+  // Phone back button support for bottom sheet
+  useEffect(() => {
+    if (detailMovement) {
+      if (!sheetHistoryPushedRef.current) {
+        sheetHistoryPushedRef.current = true;
+        window.history.pushState({ movementSheet: detailMovement.id }, '');
+      }
+      const handlePopState = () => {
+        sheetHistoryPushedRef.current = false;
+        setDetailMovement(null);
+      };
+      window.addEventListener('popstate', handlePopState);
+      return () => window.removeEventListener('popstate', handlePopState);
+    } else if (sheetHistoryPushedRef.current) {
+      sheetHistoryPushedRef.current = false;
+      if (window.history.state?.movementSheet) {
+        window.history.back();
+      }
+    }
+  }, [detailMovement]);
+
+  const closeDetailSheet = () => {
+    if (sheetHistoryPushedRef.current && window.history.state?.movementSheet) {
+      window.history.back();
+    } else {
+      setDetailMovement(null);
+    }
+  };
 
   // Map items for rapid lookup of units, SKUs, and item details
   const itemMap = useMemo(() => {
@@ -54,151 +148,249 @@ export const MovementsView: React.FC<MovementsViewProps> = ({ onOpenAdjustStock 
     return itemMap.get(mov.itemId) || itemMap.get(mov.itemName.toLowerCase());
   };
 
-  const filteredMovements = useMemo(() => {
+  const todayKey = toLocalDayKey();
+  const yesterdayKey = shiftDayKey(-1);
+
+  // Step 1: Filter by period
+  const periodMovements = useMemo(() => {
+    const startMs = getPeriodStartMs(period);
     return movements
       .filter((mov) => {
-        if (selectedType !== 'all') {
-          if (selectedType === 'in_all') {
-            if (mov.type !== 'in' && mov.type !== 'production_yield') return false;
-          } else if (selectedType === 'out_all') {
-            if (mov.type !== 'out' && mov.type !== 'production_consume' && mov.type !== 'waste') {
-              return false;
-            }
-          } else if (mov.type !== selectedType) {
-            return false;
-          }
-        }
-
-        if (search.trim()) {
-          const query = search.toLowerCase();
-          const matches =
-            mov.itemName.toLowerCase().includes(query) ||
-            (mov.reason && mov.reason.toLowerCase().includes(query)) ||
-            (mov.performedByName && mov.performedByName.toLowerCase().includes(query)) ||
-            (mov.referenceId && mov.referenceId.toLowerCase().includes(query));
-          if (!matches) return false;
-        }
-        return true;
+        if (startMs === null) return true;
+        const ts = new Date(mov.timestamp).getTime();
+        if (Number.isNaN(ts)) return false;
+        return ts >= startMs;
       })
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-  }, [movements, search, selectedType]);
+  }, [movements, period]);
 
-  // Aggregate metrics summary for the audit trail
-  const metrics = useMemo(() => {
-    let totalInUnits = 0;
-    let totalOutUnits = 0;
-    let totalAdjustments = 0;
-
-    movements.forEach((m) => {
-      if (m.type === 'in' || m.type === 'production_yield') {
-        totalInUnits += m.quantity;
-      } else if (m.type === 'out' || m.type === 'production_consume' || m.type === 'waste') {
-        totalOutUnits += m.quantity;
-      } else if (m.type === 'adjustment') {
-        totalAdjustments += 1;
-      }
+  // Step 2: Filter by search (used by both All entries & By item)
+  const periodAndSearchMovements = useMemo(() => {
+    if (!search.trim()) return periodMovements;
+    const query = search.toLowerCase().trim();
+    return periodMovements.filter((mov) => {
+      const matched = itemMap.get(mov.itemId) || itemMap.get(mov.itemName.toLowerCase());
+      return (
+        mov.itemName.toLowerCase().includes(query) ||
+        (mov.reason && mov.reason.toLowerCase().includes(query)) ||
+        (mov.performedByName && mov.performedByName.toLowerCase().includes(query)) ||
+        (mov.referenceId && mov.referenceId.toLowerCase().includes(query)) ||
+        (matched?.sku && matched.sku.toLowerCase().includes(query))
+      );
     });
+  }, [periodMovements, search, itemMap]);
 
-    return {
-      totalEvents: movements.length,
-      totalInUnits,
-      totalOutUnits,
-      totalAdjustments,
-    };
-  }, [movements]);
+  // Step 3: Filter by selectedType for All entries
+  const filteredMovements = useMemo(() => {
+    if (selectedType === 'all') return periodAndSearchMovements;
+    return periodAndSearchMovements.filter((mov) => {
+      if (selectedType === 'in_all') {
+        return mov.type === 'in' || mov.type === 'production_yield';
+      }
+      if (selectedType === 'out_all') {
+        return mov.type === 'out' || mov.type === 'production_consume' || mov.type === 'waste';
+      }
+      return mov.type === selectedType;
+    });
+  }, [periodAndSearchMovements, selectedType]);
+
+  // Group filteredMovements by day (newest first)
+  const dayGroups = useMemo(() => {
+    const groups: {
+      dayKey: string;
+      label: string;
+      inCount: number;
+      outCount: number;
+      countAdj: number;
+      items: StockMovement[];
+    }[] = [];
+    const byKey = new Map<string, (typeof groups)[number]>();
+
+    for (const mov of filteredMovements) {
+      const dk = toLocalDayKey(mov.timestamp);
+      let grp = byKey.get(dk);
+      if (!grp) {
+        grp = {
+          dayKey: dk,
+          label: formatDayHeaderLabel(dk, todayKey, yesterdayKey),
+          inCount: 0,
+          outCount: 0,
+          countAdj: 0,
+          items: [],
+        };
+        byKey.set(dk, grp);
+        groups.push(grp);
+      }
+      grp.items.push(mov);
+      if (mov.type === 'in' || mov.type === 'production_yield') {
+        grp.inCount += 1;
+      } else if (mov.type === 'out' || mov.type === 'production_consume' || mov.type === 'waste') {
+        grp.outCount += 1;
+      } else if (mov.type === 'adjustment') {
+        grp.countAdj += 1;
+      }
+    }
+
+    return groups;
+  }, [filteredMovements, todayKey, yesterdayKey]);
+
+  // Summary counts for filteredMovements (dark bottom bar)
+  const filteredSummaryCounts = useMemo(() => {
+    let inCount = 0;
+    let outCount = 0;
+    let adjCount = 0;
+    for (const m of filteredMovements) {
+      if (m.type === 'in' || m.type === 'production_yield') inCount += 1;
+      else if (m.type === 'out' || m.type === 'production_consume' || m.type === 'waste') outCount += 1;
+      else if (m.type === 'adjustment') adjCount += 1;
+    }
+    return { total: filteredMovements.length, inCount, outCount, adjCount };
+  }, [filteredMovements]);
+
+  // By-item aggregation for selected period + search
+  const byItemRows = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        key: string;
+        itemName: string;
+        unit: string;
+        inTotal: number;
+        outTotal: number;
+        currentStock: number | null;
+      }
+    >();
+
+    for (const mov of periodAndSearchMovements) {
+      const matched = itemMap.get(mov.itemId) || itemMap.get(mov.itemName.toLowerCase());
+      const key = matched ? matched.id : mov.itemId || mov.itemName.toLowerCase();
+      const unit = matched?.unit || 'units';
+
+      let row = map.get(key);
+      if (!row) {
+        row = {
+          key,
+          itemName: matched?.name || mov.itemName,
+          unit,
+          inTotal: 0,
+          outTotal: 0,
+          currentStock: matched ? matched.quantity : null,
+        };
+        map.set(key, row);
+      }
+
+      if (mov.type === 'in' || mov.type === 'production_yield') {
+        row.inTotal += mov.quantity;
+      } else if (mov.type === 'out' || mov.type === 'production_consume' || mov.type === 'waste') {
+        row.outTotal += mov.quantity;
+      } else if (mov.type === 'adjustment') {
+        const delta = mov.newQuantity - mov.previousQuantity;
+        if (delta > 0) row.inTotal += delta;
+        else if (delta < 0) row.outTotal += Math.abs(delta);
+      }
+    }
+
+    return Array.from(map.values()).sort(
+      (a, b) => b.inTotal + b.outTotal - (a.inTotal + a.outTotal)
+    );
+  }, [periodAndSearchMovements, itemMap]);
 
   const typeConfig: Record<
     StockMovementType,
-    { label: string; icon: React.ElementType; color: string; prefix: string; bgBadge: string }
+    { label: string; icon: React.ElementType; color: string; prefix: string; iconCircle: string }
   > = {
     in: {
       label: 'Restock In',
       icon: ArrowDownRight,
       color: 'bg-emerald-50 text-emerald-800 border-emerald-300',
       prefix: '+',
-      bgBadge: 'bg-emerald-50 text-emerald-700',
+      iconCircle: 'bg-emerald-50 text-emerald-600 border-emerald-200',
     },
     out: {
       label: 'Stock Out',
       icon: ArrowUpRight,
       color: 'bg-amber-50 text-amber-800 border-amber-300',
       prefix: '-',
-      bgBadge: 'bg-amber-50 text-amber-700',
+      iconCircle: 'bg-amber-50 text-amber-600 border-amber-200',
     },
     production_consume: {
-      label: 'Recipe Consume',
-      icon: CookingPot,
+      label: 'BOM Consume',
+      icon: ClipboardList,
       color: 'bg-rose-50 text-rose-800 border-rose-300',
       prefix: '-',
-      bgBadge: 'bg-rose-50 text-rose-700',
+      iconCircle: 'bg-rose-50 text-rose-600 border-rose-200',
     },
     production_yield: {
-      label: 'Recipe Yield',
+      label: 'BOM Yield',
       icon: Sparkles,
       color: 'bg-indigo-50 text-indigo-800 border-indigo-300',
       prefix: '+',
-      bgBadge: 'bg-indigo-50 text-indigo-700',
+      iconCircle: 'bg-indigo-50 text-indigo-600 border-indigo-200',
     },
     adjustment: {
       label: 'Audit Count',
       icon: ClipboardCheck,
       color: 'bg-blue-50 text-blue-800 border-blue-300',
       prefix: '±',
-      bgBadge: 'bg-blue-50 text-blue-700',
+      iconCircle: 'bg-indigo-50 text-indigo-600 border-indigo-200',
     },
     waste: {
-      label: 'Waste / Spoilage',
+      label: 'Scrap / Damage',
       icon: Trash2,
       color: 'bg-red-50 text-red-800 border-red-300',
       prefix: '-',
-      bgBadge: 'bg-red-50 text-red-700',
+      iconCircle: 'bg-red-50 text-red-600 border-red-200',
     },
   };
 
-  // Filter option pills with live counts
+  // Filter chips with live counts (using existing selectedType values)
   const filterOptions = useMemo(() => {
     return [
-      { id: 'all', label: 'All Events', count: movements.length },
+      { id: 'all', label: 'All', count: periodAndSearchMovements.length },
       {
-        id: 'in',
-        label: 'Restocks In',
-        count: movements.filter((m) => m.type === 'in').length,
+        id: 'in_all',
+        label: 'In',
+        count: periodAndSearchMovements.filter(
+          (m) => m.type === 'in' || m.type === 'production_yield'
+        ).length,
+      },
+      {
+        id: 'out_all',
+        label: 'Out',
+        count: periodAndSearchMovements.filter(
+          (m) => m.type === 'out' || m.type === 'production_consume' || m.type === 'waste'
+        ).length,
       },
       {
         id: 'production_yield',
-        label: 'Recipe Yields',
-        count: movements.filter((m) => m.type === 'production_yield').length,
-      },
-      {
-        id: 'out',
-        label: 'Sales / Stock Out',
-        count: movements.filter((m) => m.type === 'out').length,
+        label: 'Made',
+        count: periodAndSearchMovements.filter((m) => m.type === 'production_yield').length,
       },
       {
         id: 'production_consume',
-        label: 'Recipe Consumed',
-        count: movements.filter((m) => m.type === 'production_consume').length,
+        label: 'Used',
+        count: periodAndSearchMovements.filter((m) => m.type === 'production_consume').length,
       },
       {
         id: 'adjustment',
-        label: 'Audit Counts',
-        count: movements.filter((m) => m.type === 'adjustment').length,
+        label: 'Counts',
+        count: periodAndSearchMovements.filter((m) => m.type === 'adjustment').length,
       },
       {
         id: 'waste',
-        label: 'Waste / Spoilage',
-        count: movements.filter((m) => m.type === 'waste').length,
+        label: 'Scrap',
+        count: periodAndSearchMovements.filter((m) => m.type === 'waste').length,
       },
     ];
-  }, [movements]);
+  }, [periodAndSearchMovements]);
 
   const exportExcel = () => {
     const excelRows = filteredMovements.map((m) => {
       const conf = typeConfig[m.type];
       const d = new Date(m.timestamp);
       return {
-        'Date': d.toLocaleDateString(),
-        'Time': d.toLocaleTimeString(),
+        Date: d.toLocaleDateString(),
+        Time: d.toLocaleTimeString(),
         'Item Name': m.itemName,
         'Action Type': conf ? conf.label : m.type,
         'Quantity Delta': m.quantity,
@@ -244,426 +436,414 @@ export const MovementsView: React.FC<MovementsViewProps> = ({ onOpenAdjustStock 
   };
 
   const formatDate = (iso: string) => {
-    const d = new Date(iso);
     return {
-      date: d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }),
-      time: d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }),
+      date: formatSharedDate(iso),
+      time: formatTime12h(iso),
     };
   };
 
-  return (
-    <div className="space-y-4 sm:space-y-6 pb-12 w-full overflow-x-hidden">
-      {/* Top Header & Action Controls */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div>
-          <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
-            Stock Movement Audit Trail
-          </h1>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Immutable transaction ledger tracking all stock intakes, batch production usages, dispatches, and count audits.
-          </p>
-        </div>
+  const getMovementSignedDisplay = (mov: StockMovement) => {
+    const unit = getItemUnit(mov);
+    if (mov.type === 'in' || mov.type === 'production_yield') {
+      return {
+        text: `+${formatQtyClean(mov.quantity, unit)} ${unit}`,
+        colorClass: 'text-emerald-600',
+      };
+    }
+    if (mov.type === 'out' || mov.type === 'production_consume' || mov.type === 'waste') {
+      return {
+        text: `−${formatQtyClean(mov.quantity, unit)} ${unit}`,
+        colorClass: 'text-rose-600',
+      };
+    }
+    // adjustment: use real direction (newQuantity - previousQuantity)
+    const delta = mov.newQuantity - mov.previousQuantity;
+    const sign = delta > 0 ? '+' : delta < 0 ? '−' : '';
+    return {
+      text: `${sign}${formatQtyClean(Math.abs(delta), unit)} ${unit}`,
+      colorClass: 'text-indigo-600',
+    };
+  };
 
-        <div className="flex items-center gap-2 flex-wrap">
-          {/* New Stock Adjustment Action Button */}
+  const detailMatchedItem = detailMovement ? getMatchedItem(detailMovement) : undefined;
+  const detailCfg = detailMovement ? typeConfig[detailMovement.type] || typeConfig.adjustment : null;
+  const detailSigned = detailMovement ? getMovementSignedDisplay(detailMovement) : null;
+  const detailTime = detailMovement ? formatDate(detailMovement.timestamp) : null;
+
+  return (
+    <div className="space-y-3.5 pb-12 max-w-[900px] mx-auto w-full overflow-x-clip">
+      {/* B1. HEADER: one compact row */}
+      <div className="flex items-center justify-end sm:justify-between gap-2">
+        <h1 className="hidden sm:block text-xl sm:text-2xl font-bold text-slate-900 tracking-tight truncate">
+          Stock Movements
+        </h1>
+
+        <div className="flex items-center gap-2 shrink-0">
+          {permissions.canExportExcel && (
+            <div className="relative" ref={exportMenuRef}>
+              <button
+                type="button"
+                onClick={() => setIsExportMenuOpen((prev) => !prev)}
+                disabled={filteredMovements.length === 0}
+                className="inline-flex items-center gap-1 px-2.5 py-2 rounded-xl text-xs font-bold border border-emerald-300 bg-white hover:bg-emerald-50 text-emerald-800 transition shadow-2xs cursor-pointer active:scale-95 disabled:opacity-40"
+                title="Export movements"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                <span>Excel</span>
+                <ChevronDown className="w-3 h-3 text-emerald-700 shrink-0" />
+              </button>
+
+              {isExportMenuOpen && (
+                <div className="absolute right-0 mt-1.5 w-36 bg-white rounded-xl border border-slate-200 shadow-lg py-1 z-30">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsExportMenuOpen(false);
+                      exportExcel();
+                    }}
+                    className="w-full text-left px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
+                  >
+                    Excel (.xlsx)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsExportMenuOpen(false);
+                      exportCSV();
+                    }}
+                    className="w-full text-left px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
+                  >
+                    CSV (.csv)
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
           {permissions.canAdjustStock && (
             <button
               type="button"
               onClick={() => onOpenAdjustStock?.()}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition shadow-xs cursor-pointer active:scale-95"
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition shadow-xs cursor-pointer active:scale-95"
               title="Record a stock adjustment"
             >
-              <SlidersHorizontal className="w-3.5 h-3.5" />
-              <span>+ New Adjustment</span>
+              <SlidersHorizontal className="w-3.5 h-3.5 shrink-0" />
+              <span>Adjust</span>
             </button>
           )}
+        </div>
+      </div>
 
-          {permissions.canExportExcel && (
+      {/* B2. SEARCH + PERIOD: one row */}
+      <div className="flex items-center gap-2">
+        <div className="flex-1 min-w-0 h-[38px] flex items-center gap-2 px-3 rounded-xl bg-white border border-slate-200 shadow-2xs">
+          <Search className="w-4 h-4 text-slate-400 shrink-0" />
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Item, person, batch…"
+            className="flex-1 min-w-0 bg-transparent text-xs outline-none text-slate-900 placeholder:text-slate-400"
+          />
+          {search && (
             <button
               type="button"
-              onClick={exportExcel}
-              disabled={filteredMovements.length === 0}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold border border-emerald-300 bg-white hover:bg-emerald-50 text-emerald-800 transition shadow-2xs cursor-pointer active:scale-95 disabled:opacity-40"
-              title="Download Excel (.xlsx) report"
+              onClick={() => setSearch('')}
+              aria-label="Clear search"
+              className="text-slate-400 hover:text-slate-600 cursor-pointer shrink-0"
             >
-              <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
-              <span>Export Excel</span>
+              <X className="w-3.5 h-3.5" />
             </button>
           )}
         </div>
+
+        <select
+          value={period}
+          onChange={(e) => setPeriod(e.target.value as PeriodId)}
+          aria-label="Filter period"
+          className="h-[38px] px-2.5 rounded-xl bg-white border border-slate-200 text-sm font-bold text-slate-700 shadow-2xs outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer shrink-0"
+        >
+          <option value="today">Today</option>
+          <option value="7d">7 days</option>
+          <option value="30d">30 days</option>
+          <option value="all">All</option>
+        </select>
       </div>
 
-      {/* Mobile-Friendly Summary Metric Strip (2x2 on mobile, 4-col on tablet/desktop) */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 sm:gap-2.5">
-        {/* Total Inflow */}
-        <div className="bg-white p-3 rounded-2xl border border-slate-200 shadow-2xs flex flex-col justify-between">
-          <div className="text-[10px] font-bold text-emerald-700 uppercase tracking-wider flex items-center justify-between">
-            <span>Total Inflow</span>
-            <TrendingUp className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-          </div>
-          <div className="text-base sm:text-lg font-black text-emerald-700 mt-1">
-            +{metrics.totalInUnits.toFixed(1)}
-          </div>
-          <div className="text-[10px] text-slate-400 mt-0.5 truncate">Intakes & Yields</div>
-        </div>
-
-        {/* Total Outflow */}
-        <div className="bg-white p-3 rounded-2xl border border-slate-200 shadow-2xs flex flex-col justify-between">
-          <div className="text-[10px] font-bold text-rose-700 uppercase tracking-wider flex items-center justify-between">
-            <span>Total Outflow</span>
-            <TrendingDown className="w-3.5 h-3.5 text-rose-600 shrink-0" />
-          </div>
-          <div className="text-base sm:text-lg font-black text-rose-700 mt-1">
-            -{metrics.totalOutUnits.toFixed(1)}
-          </div>
-          <div className="text-[10px] text-slate-400 mt-0.5 truncate">Sales, Consumed, Waste</div>
-        </div>
-
-        {/* Audit Adjustments */}
-        <div className="bg-white p-3 rounded-2xl border border-slate-200 shadow-2xs flex flex-col justify-between">
-          <div className="text-[10px] font-bold text-blue-700 uppercase tracking-wider flex items-center justify-between">
-            <span>Audit Counts</span>
-            <ClipboardCheck className="w-3.5 h-3.5 text-blue-600 shrink-0" />
-          </div>
-          <div className="text-base sm:text-lg font-black text-blue-700 mt-1">
-            {metrics.totalAdjustments}
-          </div>
-          <div className="text-[10px] text-slate-400 mt-0.5 truncate">Physical Stock Checks</div>
-        </div>
-
-        {/* Total Events */}
-        <div className="bg-white p-3 rounded-2xl border border-slate-200 shadow-2xs flex flex-col justify-between">
-          <div className="text-[10px] font-bold text-slate-600 uppercase tracking-wider flex items-center justify-between">
-            <span>Audit Entries</span>
-            <History className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-          </div>
-          <div className="text-base sm:text-lg font-black text-slate-900 mt-1">
-            {metrics.totalEvents}
-          </div>
-          <div className="text-[10px] text-slate-400 mt-0.5 truncate">Complete Ledger Trail</div>
-        </div>
+      {/* B3. TWO TABS: "All entries" | "By item" */}
+      <div className="grid grid-cols-2 p-1 bg-slate-100 rounded-xl border border-slate-200">
+        <button
+          type="button"
+          onClick={() => setActiveTab('all_entries')}
+          className={`py-2 px-3 rounded-lg text-xs font-bold transition cursor-pointer ${
+            activeTab === 'all_entries'
+              ? 'bg-white text-slate-900 shadow-2xs'
+              : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          All entries
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('by_item')}
+          className={`py-2 px-3 rounded-lg text-xs font-bold transition cursor-pointer ${
+            activeTab === 'by_item'
+              ? 'bg-white text-slate-900 shadow-2xs'
+              : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          By item
+        </button>
       </div>
 
-      {/* Search & Filter Bar */}
-      <div className="space-y-2.5">
-        <div className="p-2 bg-white rounded-xl border border-slate-200 flex items-center gap-2 shadow-2xs">
-          <div className="relative flex-1 min-w-0">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search by product, reason, reference ID, or operator..."
-              className="w-full pl-9 pr-8 py-1.5 text-xs rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 placeholder:text-slate-400"
-            />
-            {search && (
-              <button
-                type="button"
-                onClick={() => setSearch('')}
-                className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-600"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Horizontal Scrollable Filter Strip for Smooth Phone Navigation */}
-        <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
-          {filterOptions.map((opt) => (
-            <button
-              key={opt.id}
-              type="button"
-              onClick={() => setSelectedType(opt.id)}
-              className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition flex items-center gap-1.5 shrink-0 cursor-pointer ${
-                selectedType === opt.id
-                  ? 'bg-slate-900 text-white shadow-xs font-bold'
-                  : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100/70 shadow-2xs'
-              }`}
-            >
-              <span>{opt.label}</span>
-              <span
-                className={`text-[10px] font-bold px-1.5 py-0.2 rounded-md ${
-                  selectedType === opt.id ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-800'
-                }`}
-              >
-                {opt.count}
-              </span>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Main Ledger Content */}
-      {filteredMovements.length === 0 ? (
-        <div className="bg-white rounded-2xl border border-slate-200 p-8 sm:p-12 text-center space-y-3 shadow-2xs">
-          <History className="w-12 h-12 text-slate-300 mx-auto" />
-          <h3 className="text-sm font-bold text-slate-800">No stock movements found</h3>
-          <p className="text-xs text-slate-500 max-w-sm mx-auto">
-            {search.trim()
-              ? 'No audit movements match your active search terms or type filter.'
-              : 'Any stock intake, batch run, or inventory count adjustment will automatically appear here.'}
-          </p>
-          {permissions.canAdjustStock && (
-            <div className="pt-1">
-              <button
-                type="button"
-                onClick={() => onOpenAdjustStock?.()}
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition shadow-xs cursor-pointer active:scale-95"
-              >
-                <SlidersHorizontal className="w-3.5 h-3.5" />
-                <span>Make First Stock Adjustment</span>
-              </button>
-            </div>
-          )}
-        </div>
-      ) : (
-        <>
-          {/* =========================================================================
-              MOBILE VIEW: HIGH-CLARITY AUDIT PASSBOOK CARDS (Screens < md)
-              ========================================================================= */}
-          <div className="md:hidden space-y-3">
-            {filteredMovements.map((mov) => {
-              const cfg = typeConfig[mov.type] || typeConfig.adjustment;
-              const Icon = cfg.icon;
-              const timeInfo = formatDate(mov.timestamp);
-              const unit = getItemUnit(mov);
-              const matched = getMatchedItem(mov);
-
-              const isPositive = cfg.prefix === '+';
-              const isNegative = cfg.prefix === '-';
-
-              return (
-                <div
-                  key={mov.id}
-                  className="bg-white rounded-2xl border border-slate-200/90 p-4 shadow-2xs space-y-3"
+      {/* ===================================================================== */}
+      {/* B4. ALL ENTRIES TAB                                                   */}
+      {/* ===================================================================== */}
+      {activeTab === 'all_entries' && (
+        <div className="space-y-3">
+          {/* ONE horizontal scroll row of chips with right fade */}
+          <div className="relative">
+            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5 pr-6">
+              {filterOptions.map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => setSelectedType(opt.id)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition flex items-center gap-1.5 shrink-0 cursor-pointer ${
+                    selectedType === opt.id
+                      ? 'bg-slate-900 text-white shadow-xs font-bold'
+                      : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100/70 shadow-2xs'
+                  }`}
                 >
-                  {/* Card Header: Timestamp & Action Type Tag */}
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
-                      <Clock className="w-3 h-3 text-slate-400 shrink-0" />
-                      <span>{timeInfo.date} • {timeInfo.time}</span>
-                    </div>
-
-                    <span
-                      className={`inline-flex items-center gap-1 text-[10px] font-bold px-2.5 py-0.5 rounded-full border ${cfg.color}`}
-                    >
-                      <Icon className="w-3 h-3" />
-                      <span>{cfg.label}</span>
-                    </span>
-                  </div>
-
-                  {/* Product Title & Narration */}
-                  <div className="space-y-1">
-                    <div className="flex items-start justify-between gap-2">
-                      <h3 className="font-bold text-sm text-slate-900 leading-snug break-words">
-                        {mov.itemName}
-                      </h3>
-                      {matched?.sku && (
-                        <span className="font-mono text-[10px] text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded shrink-0">
-                          {matched.sku}
-                        </span>
-                      )}
-                    </div>
-
-                    {mov.reason && (
-                      <p className="text-xs text-slate-600 font-medium">
-                        {mov.reason}
-                      </p>
-                    )}
-
-                    <div className="flex items-center gap-2 text-[11px] text-slate-400 flex-wrap">
-                      <span className="flex items-center gap-1">
-                        <User className="w-3 h-3 text-slate-400" />
-                        <span>By {mov.performedByName || 'System'}</span>
-                      </span>
-                      {mov.referenceId && (
-                        <span className="font-mono text-slate-500 bg-slate-50 px-1 rounded border border-slate-100">
-                          Ref #{mov.referenceId}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* 3-Column Passbook Balance Strip */}
-                  <div className="grid grid-cols-3 gap-2 bg-slate-50/80 p-2.5 rounded-xl border border-slate-200/70 text-center">
-                    {/* Before */}
-                    <div>
-                      <div className="text-[9px] font-bold uppercase tracking-wider text-slate-400">
-                        Before
-                      </div>
-                      <div className="font-mono font-medium text-xs text-slate-600 mt-0.5">
-                        {mov.previousQuantity.toFixed(1)}{' '}
-                        <span className="text-[9px] text-slate-400">{unit}</span>
-                      </div>
-                    </div>
-
-                    {/* Delta / Change */}
-                    <div>
-                      <div className="text-[9px] font-bold uppercase tracking-wider text-slate-400">
-                        Movement
-                      </div>
-                      <div
-                        className={`font-mono font-black text-xs sm:text-sm mt-0.5 ${
-                          isPositive
-                            ? 'text-emerald-700'
-                            : isNegative
-                            ? 'text-rose-700'
-                            : 'text-blue-700'
-                        }`}
-                      >
-                        {cfg.prefix}
-                        {mov.quantity.toFixed(1)}{' '}
-                        <span className="text-[9px] font-semibold">{unit}</span>
-                      </div>
-                    </div>
-
-                    {/* After / Closing */}
-                    <div>
-                      <div className="text-[9px] font-bold uppercase tracking-wider text-slate-400">
-                        Balance
-                      </div>
-                      <div className="font-mono font-black text-xs sm:text-sm text-slate-900 mt-0.5">
-                        {mov.newQuantity.toFixed(1)}{' '}
-                        <span className="text-[9px] font-semibold text-slate-500">{unit}</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Action Quick Button */}
-                  {permissions.canAdjustStock && matched && (
-                    <div className="pt-1 flex items-center justify-end">
-                      <button
-                        type="button"
-                        onClick={() => onOpenAdjustStock?.(matched)}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-indigo-700 bg-indigo-50/60 hover:bg-indigo-100 border border-indigo-200 transition cursor-pointer active:scale-95"
-                      >
-                        <SlidersHorizontal className="w-3 h-3 text-indigo-600" />
-                        <span>Adjust This Stock</span>
-                      </button>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+                  <span>{opt.label}</span>
+                  <span
+                    className={`text-[10px] font-bold px-1.5 py-0.2 rounded-md ${
+                      selectedType === opt.id
+                        ? 'bg-white/20 text-white'
+                        : 'bg-slate-100 text-slate-700'
+                    }`}
+                  >
+                    {opt.count}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-y-0 right-0 w-6 bg-gradient-to-l from-slate-50 to-transparent"
+            />
           </div>
 
-          {/* =========================================================================
-              DESKTOP VIEW: COMPREHENSIVE AUDIT DATA TABLE (Screens >= md)
-              ========================================================================= */}
-          <div className="hidden md:block bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-2xs">
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
+          {filteredMovements.length === 0 ? (
+            <div className="bg-white rounded-2xl border border-slate-200 p-8 sm:p-12 text-center space-y-3 shadow-2xs">
+              <History className="w-12 h-12 text-slate-300 mx-auto" />
+              <h3 className="text-sm font-bold text-slate-800">No stock movements found</h3>
+              <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                {search.trim()
+                  ? 'No audit movements match your active search terms or type filter.'
+                  : 'Any stock intake, batch run, or inventory count adjustment will automatically appear here.'}
+              </p>
+              {permissions.canAdjustStock && (
+                <div className="pt-1">
+                  <button
+                    type="button"
+                    onClick={() => onOpenAdjustStock?.()}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition shadow-xs cursor-pointer active:scale-95"
+                  >
+                    <SlidersHorizontal className="w-3.5 h-3.5" />
+                    <span>Make First Stock Adjustment</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <>
+              <div className="space-y-3">
+                {dayGroups.map((grp) => (
+                  <div
+                    key={grp.dayKey}
+                    className="bg-white rounded-2xl border border-slate-200 overflow-x-clip shadow-2xs"
+                  >
+                    {/* Sticky Day Header */}
+                    <div
+                      style={{ top: 'calc(4rem + env(safe-area-inset-top))' }}
+                      className="sticky z-10 px-3.5 py-2 rounded-t-2xl bg-slate-100/95 backdrop-blur-xs border-b border-slate-200 flex items-center justify-between gap-2 text-[11px]"
+                    >
+                      <span className="font-bold tracking-wide text-slate-700 truncate">
+                        {grp.label} · {grp.items.length}{' '}
+                        {grp.items.length === 1 ? 'entry' : 'entries'}
+                      </span>
+
+                      <span className="font-semibold flex items-center gap-1.5 shrink-0">
+                        {grp.inCount > 0 && (
+                          <span className="text-emerald-600">{grp.inCount} in</span>
+                        )}
+                        {grp.inCount > 0 && (grp.outCount > 0 || grp.countAdj > 0) && (
+                          <span className="text-slate-400">·</span>
+                        )}
+                        {grp.outCount > 0 && (
+                          <span className="text-rose-600">{grp.outCount} out</span>
+                        )}
+                        {grp.outCount > 0 && grp.countAdj > 0 && (
+                          <span className="text-slate-400">·</span>
+                        )}
+                        {grp.countAdj > 0 && (
+                          <span className="text-indigo-600">
+                            {grp.countAdj} {grp.countAdj === 1 ? 'count' : 'counts'}
+                          </span>
+                        )}
+                      </span>
+                    </div>
+
+                    {/* Compact Rows (same on mobile and desktop) */}
+                    <div className="divide-y divide-slate-100 rounded-b-2xl overflow-hidden">
+                      {grp.items.map((mov) => {
+                        const cfg = typeConfig[mov.type] || typeConfig.adjustment;
+                        const Icon = cfg.icon;
+                        const timeInfo = formatDate(mov.timestamp);
+                        const signed = getMovementSignedDisplay(mov);
+                        const detailNote = mov.reason || mov.referenceId;
+
+                        return (
+                          <button
+                            key={mov.id}
+                            type="button"
+                            onClick={() => setDetailMovement(mov)}
+                            className="w-full text-left px-3.5 py-2.5 hover:bg-slate-50/80 active:bg-slate-100/70 transition flex items-center justify-between gap-2.5 cursor-pointer"
+                          >
+                            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                              <span
+                                className={`w-8 h-8 rounded-full border flex items-center justify-center shrink-0 ${cfg.iconCircle}`}
+                              >
+                                <Icon className="w-3.5 h-3.5" />
+                              </span>
+
+                              <div className="min-w-0 flex-1">
+                                <div className="text-xs sm:text-sm font-bold text-slate-900 line-clamp-2 break-words">
+                                  {mov.itemName}
+                                </div>
+                                <div className="text-[11px] text-slate-500 line-clamp-2 break-words mt-0.5">
+                                  {mov.performedByName || 'System'}
+                                  {detailNote ? ` · ${detailNote}` : ''} · {timeInfo.time}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="text-right shrink-0">
+                              <div
+                                className={`font-mono tabular-nums text-sm font-extrabold ${signed.colorClass}`}
+                              >
+                                {signed.text}
+                              </div>
+                              <div className="font-mono tabular-nums text-[10px] text-slate-400">
+                                {formatQtyClean(mov.previousQuantity, getItemUnit(mov))} →{' '}
+                                {formatQtyClean(mov.newQuantity, getItemUnit(mov))}
+                              </div>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Load More Movements */}
+              {hasMoreMovements && (
+                <div className="text-center pt-1">
+                  <button
+                    type="button"
+                    onClick={loadMoreMovements}
+                    className="px-5 py-2 rounded-xl text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 transition cursor-pointer"
+                  >
+                    Load More Movements
+                  </button>
+                </div>
+              )}
+
+              {/* Slim dark summary bar under the list */}
+              <div className="bg-slate-900 text-slate-100 rounded-2xl px-4 py-2.5 text-xs font-semibold flex items-center justify-center flex-wrap gap-x-2 gap-y-1 font-mono tabular-nums">
+                <span>
+                  {PERIOD_LABELS[period]} {filteredSummaryCounts.total}
+                </span>
+                <span className="text-slate-500">·</span>
+                <span className="text-emerald-400">In {filteredSummaryCounts.inCount}</span>
+                <span className="text-slate-500">·</span>
+                <span className="text-rose-400">Out {filteredSummaryCounts.outCount}</span>
+                <span className="text-slate-500">·</span>
+                <span className="text-indigo-300">Counts {filteredSummaryCounts.adjCount}</span>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* B5. BY ITEM TAB                                                       */}
+      {/* ===================================================================== */}
+      {activeTab === 'by_item' && (
+        <div className="space-y-3">
+          {byItemRows.length === 0 ? (
+            <div className="bg-white rounded-2xl border border-slate-200 p-8 sm:p-12 text-center space-y-3 shadow-2xs">
+              <History className="w-12 h-12 text-slate-300 mx-auto" />
+              <h3 className="text-sm font-bold text-slate-800">No stock movements found</h3>
+              <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                {search.trim()
+                  ? 'No audit movements match your active search terms or period filter.'
+                  : 'Any stock intake, batch run, or inventory count adjustment will automatically appear here.'}
+              </p>
+            </div>
+          ) : (
+            <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-2xs">
+              <table className="w-full text-left border-collapse table-fixed">
                 <thead>
-                  <tr className="bg-slate-50/75 border-b border-slate-200 text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
-                    <th className="py-3 px-4">Date & Time</th>
-                    <th className="py-3 px-3">Item Name</th>
-                    <th className="py-3 px-3">Action Type</th>
-                    <th className="py-3 px-3 text-right">Delta</th>
-                    <th className="py-3 px-3 text-right">Before → After</th>
-                    <th className="py-3 px-3">Reason / Ref</th>
-                    <th className="py-3 px-3">Recorded By</th>
-                    {permissions.canAdjustStock && <th className="py-3 px-4 text-right">Action</th>}
+                  <tr className="bg-slate-50 border-b border-slate-200 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                    <th className="py-2.5 pl-3.5 pr-2">Item</th>
+                    <th className="py-2.5 px-1.5 text-right w-16">In</th>
+                    <th className="py-2.5 px-1.5 text-right w-16">Out</th>
+                    <th className="py-2.5 pl-1.5 pr-3.5 text-right w-20">Now</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 text-xs">
-                  {filteredMovements.map((mov) => {
-                    const cfg = typeConfig[mov.type] || typeConfig.adjustment;
-                    const Icon = cfg.icon;
-                    const timeInfo = formatDate(mov.timestamp);
-                    const unit = getItemUnit(mov);
-                    const matched = getMatchedItem(mov);
-
-                    const isPositive = cfg.prefix === '+';
-                    const isNegative = cfg.prefix === '-';
-
-                    return (
-                      <tr key={mov.id} className="hover:bg-slate-50/60 transition">
-                        <td className="py-3 px-4 whitespace-nowrap">
-                          <div className="font-medium text-slate-800">{timeInfo.date}</div>
-                          <div className="text-[11px] text-slate-400">{timeInfo.time}</div>
-                        </td>
-
-                        <td className="py-3 px-3">
-                          <div className="font-semibold text-slate-900">{mov.itemName}</div>
-                          {matched?.sku && (
-                            <div className="font-mono text-[10px] text-slate-400">
-                              SKU: {matched.sku}
-                            </div>
-                          )}
-                        </td>
-
-                        <td className="py-3 px-3 whitespace-nowrap">
-                          <span
-                            className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2.5 py-0.5 rounded-full border ${cfg.color}`}
-                          >
-                            <Icon className="w-3 h-3" />
-                            <span>{cfg.label}</span>
+                  {byItemRows.map((row) => (
+                    <tr
+                      key={row.key}
+                      onClick={() => {
+                        setSearch(row.itemName);
+                        setSelectedType('all');
+                        setActiveTab('all_entries');
+                      }}
+                      className="hover:bg-slate-50/80 active:bg-slate-100/70 transition cursor-pointer"
+                    >
+                      <td className="py-2.5 pl-3.5 pr-2 min-w-0">
+                        <div className="font-bold text-slate-900 line-clamp-2 break-words">{row.itemName}</div>
+                        <div className="text-[10px] text-slate-400">{row.unit}</div>
+                      </td>
+                      <td className="py-2.5 px-1.5 text-right font-mono tabular-nums font-semibold text-emerald-600">
+                        {row.inTotal > 0 ? `+${formatQtyClean(row.inTotal, row.unit)}` : '—'}
+                      </td>
+                      <td className="py-2.5 px-1.5 text-right font-mono tabular-nums font-semibold text-rose-600">
+                        {row.outTotal > 0 ? `−${formatQtyClean(row.outTotal, row.unit)}` : '—'}
+                      </td>
+                      <td className="py-2.5 pl-1.5 pr-3 text-right font-mono tabular-nums font-bold text-slate-900">
+                        <span className="inline-flex items-center justify-end gap-0.5">
+                          <span>
+                            {row.currentStock !== null ? formatQtyClean(row.currentStock, row.unit) : '—'}
                           </span>
-                        </td>
-
-                        <td className="py-3 px-3 text-right whitespace-nowrap font-mono font-bold">
-                          <span
-                            className={
-                              isPositive
-                                ? 'text-emerald-700'
-                                : isNegative
-                                ? 'text-rose-700'
-                                : 'text-blue-700'
-                            }
-                          >
-                            {cfg.prefix}
-                            {mov.quantity.toFixed(1)} {unit}
-                          </span>
-                        </td>
-
-                        <td className="py-3 px-3 text-right whitespace-nowrap font-mono text-[11px] text-slate-500">
-                          {mov.previousQuantity.toFixed(1)} →{' '}
-                          <strong className="text-slate-900">{mov.newQuantity.toFixed(1)}</strong>{' '}
-                          {unit}
-                        </td>
-
-                        <td className="py-3 px-3 text-slate-600 max-w-xs truncate">
-                          <div>{mov.reason || '—'}</div>
-                          {mov.referenceId && (
-                            <span className="font-mono text-[10px] text-slate-400">
-                              #{mov.referenceId}
-                            </span>
-                          )}
-                        </td>
-
-                        <td className="py-3 px-3 text-slate-600 whitespace-nowrap">
-                          <span className="font-medium text-slate-800">
-                            {mov.performedByName || 'System'}
-                          </span>
-                        </td>
-
-                        {permissions.canAdjustStock && (
-                          <td className="py-3 px-4 text-right whitespace-nowrap">
-                            {matched && (
-                              <button
-                                type="button"
-                                onClick={() => onOpenAdjustStock?.(matched)}
-                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 transition cursor-pointer"
-                                title="Adjust stock for this item"
-                              >
-                                <SlidersHorizontal className="w-3 h-3" />
-                                <span>Adjust</span>
-                              </button>
-                            )}
-                          </td>
-                        )}
-                      </tr>
-                    );
-                  })}
+                          <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
-          </div>
+          )}
 
-          {/* Load More Movements */}
+          <p className="text-center text-[11px] text-slate-400">Based on loaded entries</p>
+
           {hasMoreMovements && (
-            <div className="text-center pt-2">
+            <div className="text-center">
               <button
                 type="button"
                 onClick={loadMoreMovements}
@@ -673,7 +853,117 @@ export const MovementsView: React.FC<MovementsViewProps> = ({ onOpenAdjustStock 
               </button>
             </div>
           )}
-        </>
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* B4 DETAIL BOTTOM SHEET                                                */}
+      {/* ===================================================================== */}
+      {detailMovement && detailCfg && detailSigned && detailTime && (
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-900/50 backdrop-blur-xs animate-in fade-in duration-150"
+          onClick={closeDetailSheet}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ paddingBottom: 'calc(1.25rem + env(safe-area-inset-bottom))' }}
+            className="w-full sm:max-w-md bg-white rounded-t-3xl sm:rounded-2xl border border-slate-200 shadow-2xl p-5 space-y-4 overscroll-contain max-h-[85vh] overflow-y-auto"
+          >
+            <div className="w-10 h-1 rounded-full bg-slate-200 mx-auto sm:hidden" />
+
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <span
+                  className={`w-9 h-9 rounded-full border flex items-center justify-center shrink-0 ${detailCfg.iconCircle}`}
+                >
+                  <detailCfg.icon className="w-4 h-4" />
+                </span>
+                <div className="min-w-0">
+                  <div className="text-xs font-bold text-slate-500">{detailCfg.label}</div>
+                  <h3 className="text-base font-bold text-slate-900 truncate">
+                    {detailMovement.itemName}
+                  </h3>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={closeDetailSheet}
+                aria-label="Close details"
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 cursor-pointer shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/80 space-y-2.5 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-slate-500">Quantity</span>
+                <span className={`font-mono tabular-nums text-base font-black ${detailSigned.colorClass}`}>
+                  {detailSigned.text}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-slate-500">Previous → New</span>
+                <span className="font-mono tabular-nums font-bold text-slate-800">
+                  {formatQtyClean(detailMovement.previousQuantity, getItemUnit(detailMovement))} →{' '}
+                  {formatQtyClean(detailMovement.newQuantity, getItemUnit(detailMovement))} {getItemUnit(detailMovement)}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-slate-500">Date &amp; Time</span>
+                <span className="font-medium text-slate-800">
+                  {formatDateTime(detailMovement.timestamp)}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-slate-500">Recorded By</span>
+                <span className="font-medium text-slate-800">
+                  {detailMovement.performedByName || 'System'}
+                </span>
+              </div>
+              {detailMovement.reason && (
+                <div className="pt-2 border-t border-slate-200">
+                  <span className="text-slate-500 block mb-0.5">Reason</span>
+                  <span className="font-medium text-slate-800 break-words">
+                    {detailMovement.reason}
+                  </span>
+                </div>
+              )}
+              {detailMovement.referenceId && (
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-500">Reference</span>
+                  <span className="font-mono text-slate-700">{detailMovement.referenceId}</span>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={closeDetailSheet}
+                className="flex-1 py-2.5 px-4 rounded-xl text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 transition cursor-pointer"
+              >
+                Close
+              </button>
+              {permissions.canAdjustStock && detailMatchedItem && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const target = detailMatchedItem;
+                    sheetHistoryPushedRef.current = false;
+                    setDetailMovement(null);
+                    onOpenAdjustStock?.(target);
+                  }}
+                  className="flex-1 inline-flex items-center justify-center gap-1.5 py-2.5 px-4 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition cursor-pointer"
+                >
+                  <SlidersHorizontal className="w-3.5 h-3.5" />
+                  <span>Adjust stock</span>
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -1,18 +1,18 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   ArrowLeft,
-  Flame,
+  Package,
   CheckCircle2,
   AlertTriangle,
-  ClipboardCheck,
   Plus,
   Trash2,
   RotateCcw,
-  Boxes,
-  Package,
+  Search,
+  X,
+  Edit3,
+  Check,
   Layers,
-  ChevronRight,
-  Info,
+  Sparkles,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { Recipe, InventoryItem } from '../types/inventory';
@@ -24,6 +24,7 @@ import {
   getAvailableStockForIngredient,
   getItemQuantity,
 } from '../utils/itemResolver';
+import { formatQty, isWholeUnit } from '../utils/numberFormat';
 
 interface AdjustableIngredient {
   rawItemId: string;
@@ -49,7 +50,7 @@ export const NewProductionRunPage: React.FC<NewProductionRunPageProps> = ({
     recipes,
     produceRecipeBatch,
     submitAuditRequest,
-    getRecipeFeasibility,
+    showActionToast,
   } = useInventory();
   const { permissions, simulatedName, role } = useAuth();
 
@@ -61,25 +62,52 @@ export const NewProductionRunPage: React.FC<NewProductionRunPageProps> = ({
     return recipes.length > 0 ? recipes[0].id : '';
   });
 
+  // Recipe Picker modal state
+  const [isRecipePickerOpen, setIsRecipePickerOpen] = useState(false);
+  const [recipeSearchQuery, setRecipeSearchQuery] = useState('');
+
   // Batch multiplier & custom yield
   const [batchMultiplier, setBatchMultiplier] = useState<number | ''>(1);
   const [customYield, setCustomYield] = useState<number | ''>('');
+  const [showCustomYieldInput, setShowCustomYieldInput] = useState(false);
   const [selectedFinishedItemId, setSelectedFinishedItemId] = useState<string>('');
 
   // Editable list of ingredients for this run
   const [adjustedIngredients, setAdjustedIngredients] = useState<AdjustableIngredient[]>([]);
+  const [isEditingAmounts, setIsEditingAmounts] = useState(false);
 
   // Extra item adder state
-  const [extraItemId, setExtraItemId] = useState<string>('');
+  const [isAddingExtra, setIsAddingExtra] = useState(false);
+  const [extraItemId, setExtraItemId] = useState('');
   const [extraItemQty, setExtraItemQty] = useState<number>(1);
-  const [isAddingExtra, setIsAddingExtra] = useState<boolean>(false);
 
-  // Notes & execution mode
-  const [notes, setNotes] = useState<string>('');
-  const [directApproval, setDirectApproval] = useState<boolean>(false);
-  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  // Notes state
+  const [isNotesOpen, setIsNotesOpen] = useState(false);
+  const [notes, setNotes] = useState('');
+
+  // Direct approval (bypass audit queue for managers/admins)
+  const [directApproval, setDirectApproval] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  // Mobile Back Button: Close pickers/modals first
+  useEffect(() => {
+    const anyModalOpen = isRecipePickerOpen || isAddingExtra;
+    if (!anyModalOpen) return;
+
+    window.history.pushState({ modalOpen: true }, '');
+
+    const handlePopState = () => {
+      setIsRecipePickerOpen(false);
+      setIsAddingExtra(false);
+    };
+
+    window.addEventListener('popstate', handlePopState, { once: true });
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, [isRecipePickerOpen, isAddingExtra]);
 
   // Active recipe reference
   const currentRecipe = useMemo(() => {
@@ -120,7 +148,7 @@ export const NewProductionRunPage: React.FC<NewProductionRunPageProps> = ({
         rawItemName: ing.rawItemName || (matched ? matched.name : 'Raw Material'),
         standardQuantityPerBatch: stdQty,
         quantity: Math.round(stdQty * effectiveMultiplier * 1000) / 1000,
-        unit: ing.unit || (matched ? matched.unit : 'kg'),
+        unit: ing.unit || (matched ? matched.unit : 'pcs'),
         unitCost,
       };
     });
@@ -129,10 +157,79 @@ export const NewProductionRunPage: React.FC<NewProductionRunPageProps> = ({
     setErrorMessage(null);
   }, [currentRecipe?.id, batchMultiplier]);
 
-  // Multiplier change handler
-  const handleMultiplierChange = (newMultiplier: number) => {
-    if (newMultiplier <= 0) return;
-    setBatchMultiplier(newMultiplier);
+  // Feasibility calculation for current recipe
+  const feasibility = useMemo(() => {
+    if (!currentRecipe || !currentRecipe.ingredients || currentRecipe.ingredients.length === 0) {
+      return { maxBatches: 0, limitingMaterial: '', color: 'grey' as const };
+    }
+
+    const materialTotals = new Map<
+      string,
+      { rawItemId: string; rawItemName: string; quantity: number; unit: string }
+    >();
+    for (const ing of currentRecipe.ingredients) {
+      const key = (ing.rawItemId || ing.rawItemName || '').trim();
+      if (!key) continue;
+      const existing = materialTotals.get(key);
+      const qty = Number(ing.quantity) || 0;
+      if (existing) {
+        existing.quantity += qty;
+      } else {
+        materialTotals.set(key, {
+          rawItemId: ing.rawItemId,
+          rawItemName: ing.rawItemName,
+          quantity: qty,
+          unit: ing.unit,
+        });
+      }
+    }
+
+    let minBatches = Infinity;
+    let limitingName = '';
+
+    for (const ing of materialTotals.values()) {
+      const needed = Number(ing.quantity) || 0;
+      if (needed <= 0) continue;
+
+      const { item, totalAvailable } = getAvailableStockForIngredient(items, ing);
+      const available = Math.max(0, totalAvailable);
+      const itemName = item?.name || ing.rawItemName || 'Material';
+
+      const possible = Math.floor(available / needed);
+      if (possible < minBatches) {
+        minBatches = possible;
+        limitingName = itemName;
+      }
+    }
+
+    if (minBatches === Infinity) {
+      return { maxBatches: 0, limitingMaterial: '', color: 'grey' as const };
+    }
+
+    const maxBatches = Math.max(0, minBatches);
+    const color = maxBatches === 0 ? ('red' as const) : maxBatches < 5 ? ('amber' as const) : ('green' as const);
+
+    return { maxBatches, limitingMaterial: limitingName, color };
+  }, [currentRecipe, items]);
+
+  // Stepper handlers
+  const handleMultiplierChange = (val: number) => {
+    if (val <= 0) return;
+    setBatchMultiplier(Math.round(val * 100) / 100);
+  };
+
+  const handleStepMinus = () => {
+    const cur = typeof batchMultiplier === 'number' ? batchMultiplier : 1;
+    if (cur > 1) {
+      handleMultiplierChange(cur - 1);
+    } else if (cur > 0.5) {
+      handleMultiplierChange(0.5);
+    }
+  };
+
+  const handleStepPlus = () => {
+    const cur = typeof batchMultiplier === 'number' ? batchMultiplier : 1;
+    handleMultiplierChange(cur + 1);
   };
 
   // Reset ingredients back to recipe formula standards
@@ -150,7 +247,7 @@ export const NewProductionRunPage: React.FC<NewProductionRunPageProps> = ({
         rawItemName: ing.rawItemName || (matched ? matched.name : 'Raw Material'),
         standardQuantityPerBatch: stdQty,
         quantity: Math.round(stdQty * effectiveMultiplier * 1000) / 1000,
-        unit: ing.unit || (matched ? matched.unit : 'kg'),
+        unit: ing.unit || (matched ? matched.unit : 'pcs'),
         unitCost,
       };
     });
@@ -180,7 +277,6 @@ export const NewProductionRunPage: React.FC<NewProductionRunPageProps> = ({
     const item = items.find((i) => i.id === extraItemId);
     if (!item) return;
 
-    // Check if already in list
     const existingIndex = adjustedIngredients.findIndex((ing) => ing.rawItemId === item.id);
     if (existingIndex >= 0) {
       setAdjustedIngredients((prev) =>
@@ -217,9 +313,20 @@ export const NewProductionRunPage: React.FC<NewProductionRunPageProps> = ({
       const isMissing = !item;
       const available = item ? getItemQuantity(item) : 0;
       const isSufficient = !isMissing && available >= ing.quantity;
-      const shortage = isMissing ? ing.quantity : isSufficient ? 0 : Math.round((ing.quantity - available) * 1000) / 1000;
+      const shortage = isMissing
+        ? ing.quantity
+        : isSufficient
+        ? 0
+        : Math.round((ing.quantity - available) * 1000) / 1000;
       const remainingAfter = Math.max(0, Math.round((available - ing.quantity) * 1000) / 1000);
-      const lineCost = (Number(ing.quantity) || 0) * (Number(ing.unitCost) || 0);
+      const isBelowMinAfter =
+        item && typeof item.minStock === 'number' && item.minStock > 0
+          ? remainingAfter < item.minStock
+          : false;
+
+      // Check if amount is modified compared to formula standard
+      const standardForRun = Math.round(ing.standardQuantityPerBatch * effectiveMultiplier * 1000) / 1000;
+      const isModified = ing.isExtra || Math.abs(ing.quantity - standardForRun) > 0.001;
 
       return {
         ...ing,
@@ -228,20 +335,76 @@ export const NewProductionRunPage: React.FC<NewProductionRunPageProps> = ({
         isSufficient,
         shortage,
         remainingAfter,
-        lineCost,
+        isBelowMinAfter,
+        isModified,
+        minStock: item?.minStock,
       };
     });
-  }, [adjustedIngredients, items]);
+  }, [adjustedIngredients, items, effectiveMultiplier]);
 
   const hasMissingMaterial = ingredientStockAnalysis.some((a) => a.isMissing);
-  const hasShortages = ingredientStockAnalysis.some((a) => !a.isSufficient);
+  const shortCount = ingredientStockAnalysis.filter((a) => !a.isSufficient).length;
+  const hasShortages = shortCount > 0;
 
-  const resolvedYield = Number(customYield) > 0
-    ? Number(customYield)
-    : (Number(currentRecipe?.yieldQuantity) || 1) * effectiveMultiplier;
+  const resolvedYield =
+    Number(customYield) > 0
+      ? Number(customYield)
+      : (Number(currentRecipe?.yieldQuantity) || 1) * effectiveMultiplier;
 
-  // Recipe feasibility helper
-  const feasibility = currentRecipe ? getRecipeFeasibility(currentRecipe) : { maxBatchesPossible: 0, maxUnitsPossible: 0 };
+  const finishedUnit = finishedItem?.unit || 'units';
+  const finishedStockOnHand = finishedItem ? getItemQuantity(finishedItem) : 0;
+
+  // Format table numbers:
+  // STOCK: whole numbers without decimals (35,920), other numbers max 1 decimal (6,102.3, 8,999.9).
+  // If a number still doesn't fit (>= 60,000), shorten it (e.g. 68.1k, 1.2M) instead of cutting it off.
+  const formatTableNum = (num: number, isStock: boolean = false, unit?: string): string => {
+    if (num === null || num === undefined || isNaN(num)) return '0';
+    const abs = Math.abs(num);
+    const sign = num < 0 ? '-' : '';
+
+    if (abs >= 1_000_000) {
+      const val = abs / 1_000_000;
+      const formatted = (Math.round(val * 10) / 10).toLocaleString('en-IN', {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 1,
+      });
+      return `${sign}${formatted}M`;
+    }
+
+    if (abs >= 60_000) {
+      const val = abs / 1_000;
+      const formatted = (Math.round(val * 10) / 10).toLocaleString('en-IN', {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 1,
+      });
+      return `${sign}${formatted}k`;
+    }
+
+    if (isWholeUnit(unit) || (isStock && abs % 1 === 0)) {
+      return Math.round(num).toLocaleString('en-IN', {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 0,
+      });
+    }
+
+    const rounded = Math.round(abs * 100) / 100;
+    const formatted = rounded.toLocaleString('en-IN', {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: rounded % 1 === 0 ? 0 : 2,
+    });
+    return `${sign}${formatted}`;
+  };
+
+  // Filtered recipe list for the recipe picker modal
+  const filteredPickerRecipes = useMemo(() => {
+    if (!recipeSearchQuery.trim()) return recipes;
+    const q = recipeSearchQuery.toLowerCase();
+    return recipes.filter(
+      (r) =>
+        r.name.toLowerCase().includes(q) ||
+        (r.finishedItemName || '').toLowerCase().includes(q)
+    );
+  }, [recipes, recipeSearchQuery]);
 
   // Handle Form Submission
   const handleSubmitProduction = async (e: React.FormEvent) => {
@@ -249,7 +412,7 @@ export const NewProductionRunPage: React.FC<NewProductionRunPageProps> = ({
     if (!currentRecipe) return;
 
     if (adjustedIngredients.length === 0) {
-      setErrorMessage('Please include at least one raw material or ingredient in this batch run.');
+      setErrorMessage('Please include at least one raw material in this batch run.');
       return;
     }
 
@@ -259,13 +422,13 @@ export const NewProductionRunPage: React.FC<NewProductionRunPageProps> = ({
     }
 
     if (hasMissingMaterial) {
-      setErrorMessage('Missing material — edit recipe');
+      setErrorMessage('Missing material — edit BOM');
       return;
     }
 
     if (hasShortages) {
       setErrorMessage(
-        'Cannot proceed: One or more required products have insufficient on-hand inventory stock. Please adjust quantities or restock inventory first.'
+        'Cannot proceed: One or more required items have insufficient on-hand inventory stock. Please adjust quantities or restock inventory first.'
       );
       return;
     }
@@ -274,7 +437,10 @@ export const NewProductionRunPage: React.FC<NewProductionRunPageProps> = ({
     setErrorMessage(null);
 
     // Sum quantities per material first
-    const materialTotals = new Map<string, { rawItemId: string; rawItemName: string; quantity: number; unit: string }>();
+    const materialTotals = new Map<
+      string,
+      { rawItemId: string; rawItemName: string; quantity: number; unit: string }
+    >();
     for (const ing of adjustedIngredients) {
       const existing = materialTotals.get(ing.rawItemId);
       if (existing) {
@@ -292,8 +458,24 @@ export const NewProductionRunPage: React.FC<NewProductionRunPageProps> = ({
 
     try {
       if (directApproval && permissions.canAuditRequests) {
-        // Direct Auditor Execution (Immediate update to Firestore inventory)
-        const result = await produceRecipeBatch(
+        if (typeof navigator !== 'undefined' && !navigator.onLine) {
+          setErrorMessage('No internet connection — nothing was saved. Please try again.');
+          setIsSubmitting(false);
+          return;
+        }
+        const fName = finishedItem?.name || currentRecipe.name;
+        const yieldLabel = `+${resolvedYield} ${finishedUnit} ${fName}`;
+
+        try {
+          confetti({
+            particleCount: 60,
+            spread: 70,
+            origin: { y: 0.6 },
+          });
+        } catch {}
+
+        showActionToast('Saving…', yieldLabel, 'saving');
+        const promise = produceRecipeBatch(
           currentRecipe.id,
           effectiveMultiplier,
           notes.trim() || undefined,
@@ -301,41 +483,33 @@ export const NewProductionRunPage: React.FC<NewProductionRunPageProps> = ({
           resolvedYield,
           finishedItem?.id
         );
+        setIsSubmitting(false);
+        onBack();
 
-        if (result.success) {
-          try {
-            confetti({
-              particleCount: 60,
-              spread: 70,
-              origin: { y: 0.6 },
-            });
-          } catch {}
-
-          setSuccessMessage(
-            `Batch Production Successfully Executed! Produced ${resolvedYield} ${
-              finishedItem?.unit || 'units'
-            } of ${finishedItem?.name || currentRecipe.name}. Raw material stocks have been deducted and inventory updated.`
-          );
-          // Keep button disabled until page transitions back
-          setTimeout(() => {
-            onBack();
-          }, 2400);
-        } else {
-          setErrorMessage(result.error || 'Failed to complete production run.');
-          setIsSubmitting(false);
-        }
+        promise
+          .then((result) => {
+            if (result.success) {
+              showActionToast('Batch produced', yieldLabel, 'success');
+            } else {
+              showActionToast('Production failed', result.error || 'Failed to complete production run.', 'error');
+            }
+          })
+          .catch((err: any) => {
+            showActionToast('Production failed', formatFirestoreError(err, 'Failed to complete production run.'), 'error');
+          });
+        return;
       } else {
         // Standard Audit Workflow: Submits request to Audit Queue
         const auditPayload: Parameters<typeof submitAuditRequest>[0] = {
           type: 'production',
-          title: `Production: ${currentRecipe.name} (${resolvedYield} ${finishedItem?.unit || 'units'})`,
+          title: `Production: ${currentRecipe.name} (${resolvedYield} ${finishedUnit})`,
           recipeId: currentRecipe.id,
           recipeName: currentRecipe.name,
           finishedItemId: finishedItem?.id || currentRecipe.finishedItemId,
           finishedItemName: finishedItem?.name || currentRecipe.finishedItemName,
           batchMultiplier: effectiveMultiplier,
           expectedYield: resolvedYield,
-          unit: finishedItem?.unit || 'units',
+          unit: finishedUnit,
           materialsNeeded: materialsPayload,
         };
 
@@ -354,14 +528,11 @@ export const NewProductionRunPage: React.FC<NewProductionRunPageProps> = ({
         } catch {}
 
         setSuccessMessage(
-          `Production run for "${currentRecipe.name}" (${resolvedYield} ${
-            finishedItem?.unit || 'units'
-          }) has been submitted for Audit! Raw materials will be deducted and inventory updated after an authorized auditor approves the entry in the Audit Report shelf.`
+          `Production run for "${currentRecipe.name}" (${resolvedYield} ${finishedUnit}) has been submitted for Audit! Raw materials will be deducted after approval.`
         );
-        // Keep button disabled until page transitions back
         setTimeout(() => {
           onBack();
-        }, 2500);
+        }, 2200);
       }
     } catch (err: any) {
       setErrorMessage(formatFirestoreError(err, 'Failed to complete production request.'));
@@ -370,54 +541,31 @@ export const NewProductionRunPage: React.FC<NewProductionRunPageProps> = ({
   };
 
   return (
-    <div className="space-y-6 animate-in fade-in duration-200">
-      {/* Top Header & Breadcrumb Bar */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-slate-200/80">
-        <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={onBack}
-            className="inline-flex items-center gap-2 text-xs font-bold text-indigo-700 bg-white hover:bg-indigo-50 px-3.5 py-2 rounded-xl border border-indigo-200 transition shadow-2xs cursor-pointer"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            <span>← Back to Batch Production Runs</span>
-          </button>
-          <div className="hidden sm:flex items-center gap-2 text-xs text-slate-400">
-            <span>Batch Production & Manufacturing</span>
-            <ChevronRight className="w-3.5 h-3.5" />
-            <span className="font-semibold text-slate-700">New Production Run</span>
-          </div>
-        </div>
+    <div className="max-w-3xl mx-auto pb-24 space-y-3.5 animate-in fade-in duration-150">
+      {/* =====================================================================
+          1. TOP ROW: Back Link + Operator / Role Badge
+      ===================================================================== */}
+      <div className="flex items-center justify-between gap-2 pt-1 pb-1">
+        <button
+          type="button"
+          onClick={onBack}
+          className="inline-flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-800 transition cursor-pointer"
+        >
+          <ArrowLeft className="w-4 h-4 shrink-0" />
+          <span>Production</span>
+        </button>
 
-        <div className="flex items-center gap-2 text-xs text-slate-500">
-          <span className="font-medium">Operator:</span>
-          <span className="font-bold text-slate-800">{simulatedName}</span>
+        <div className="flex items-center gap-1.5 text-[11px] text-slate-500">
+          <span className="font-medium text-slate-600">{simulatedName}</span>
           <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200 capitalize">
             {role}
           </span>
         </div>
       </div>
 
-      {/* Main Page Title Header */}
-      <div className="bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 shadow-2xs">
-        <div className="flex items-start gap-4">
-          <div className="w-12 h-12 rounded-2xl bg-indigo-600 text-white flex items-center justify-center font-bold text-xl shadow-xs shrink-0">
-            <Flame className="w-6 h-6" />
-          </div>
-          <div className="space-y-1">
-            <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
-              Execute New Production Run
-            </h1>
-            <p className="text-xs sm:text-sm text-slate-500">
-              Select your recipe formula, customize finished goods yield, and adjust product & raw material quantities before executing or submitting for audit.
-            </p>
-          </div>
-        </div>
-      </div>
-
       {/* Alert / Feedback Messages */}
       {errorMessage && (
-        <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2.5 animate-in fade-in">
+        <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2.5 animate-in fade-in">
           <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
           <div className="flex-1">
             <strong className="block font-bold">Production Error</strong>
@@ -434,7 +582,7 @@ export const NewProductionRunPage: React.FC<NewProductionRunPageProps> = ({
       )}
 
       {successMessage && (
-        <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs flex items-start gap-2.5 animate-in fade-in">
+        <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs flex items-start gap-2.5 animate-in fade-in">
           <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
           <div className="flex-1">
             <strong className="block font-bold">Success</strong>
@@ -443,396 +591,546 @@ export const NewProductionRunPage: React.FC<NewProductionRunPageProps> = ({
         </div>
       )}
 
-      {/* Main Configuration Form */}
-      <form onSubmit={handleSubmitProduction} className="max-w-3xl mx-auto space-y-6">
-        {/* Card 1: Formula & Finished Good Output Selection */}
-        <div className="bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 shadow-2xs space-y-5">
-          <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-            <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-              <Layers className="w-4 h-4 text-indigo-600" />
-              <span>1. Recipe Formula & Finished Product</span>
-            </h2>
-            <span className="text-xs font-medium text-slate-500">
-              Formula yields {currentRecipe?.yieldQuantity || 1} {finishedItem?.unit || 'units'}
-            </span>
+      {/* =====================================================================
+          2. PRODUCT CARD (One card)
+      ===================================================================== */}
+      <div className="bg-white rounded-2xl border border-slate-200 p-3.5 sm:p-4 shadow-2xs">
+        <div className="flex items-center justify-between gap-3">
+          {/* Left: 52px photo + Name + Subtitle + Feasibility Badge */}
+          <div className="flex items-center gap-3 min-w-0 flex-1">
+            {/* Photo: 52px */}
+            <div className="w-[52px] h-[52px] rounded-xl bg-slate-50 border border-slate-200/80 overflow-hidden flex items-center justify-center shrink-0">
+              {finishedItem?.photoThumb ? (
+                <img
+                  src={finishedItem.photoThumb}
+                  alt={finishedItem.name || currentRecipe?.name}
+                  className="w-full h-full object-contain p-1"
+                />
+              ) : (
+                <Package className="w-6 h-6 text-slate-400" />
+              )}
+            </div>
+
+            {/* Details */}
+            <div className="min-w-0 flex-1">
+              <h2 className="text-sm sm:text-base font-extrabold text-slate-900 truncate leading-snug">
+                {currentRecipe?.name || 'Unnamed BOM'}
+              </h2>
+              <div className="text-[11px] text-slate-500 truncate mt-0.5">
+                <span>BOM</span>
+                <span className="mx-1 text-slate-300">·</span>
+                <span>
+                  1 batch = {formatQty(currentRecipe?.yieldQuantity || 1, finishedUnit)} {finishedUnit}
+                </span>
+                <span className="mx-1 text-slate-300">·</span>
+                <span>
+                  on hand {formatQty(finishedStockOnHand, finishedUnit)} {finishedUnit}
+                </span>
+              </div>
+
+              {/* Feasibility Badge */}
+              <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+                {feasibility.color === 'green' ? (
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                    Can make up to {feasibility.maxBatches}
+                  </span>
+                ) : feasibility.color === 'amber' ? (
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
+                    Can make up to {feasibility.maxBatches}
+                  </span>
+                ) : feasibility.color === 'red' ? (
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-rose-50 text-rose-700 border border-rose-200">
+                    Can make up to 0
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-slate-100 text-slate-500 border border-slate-200">
+                    Can make —
+                  </span>
+                )}
+
+                {feasibility.limitingMaterial && (
+                  <span className="text-[10px] text-slate-400 truncate">
+                    limit: {feasibility.limitingMaterial}
+                  </span>
+                )}
+              </div>
+            </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            {/* Recipe Selector */}
-            <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-                Select Recipe Formula <span className="text-rose-500">*</span>
-              </label>
-              <select
-                value={selectedRecipeId}
-                onChange={(e) => setSelectedRecipeId(e.target.value)}
-                className="w-full text-xs bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 font-medium text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition cursor-pointer"
+          {/* Right: "Change" Recipe Button */}
+          <button
+            type="button"
+            onClick={() => {
+              setRecipeSearchQuery('');
+              setIsRecipePickerOpen(true);
+            }}
+            className="text-xs font-bold text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-xl border border-indigo-200 transition cursor-pointer shrink-0 active:scale-95"
+            title="Choose a different BOM"
+          >
+            Change
+          </button>
+        </div>
+      </div>
+
+      {/* =====================================================================
+          3. HOW MANY: Stepper + Quick Chips + "Makes {output}"
+      ===================================================================== */}
+      <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 shadow-2xs space-y-3">
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+            How Many Batches
+          </span>
+          <span className="text-xs text-slate-400">
+            Formula base: {formatQty(currentRecipe?.yieldQuantity || 1, finishedUnit)} {finishedUnit}/batch
+          </span>
+        </div>
+
+        {/* Compact Stepper: height 44px, − and + buttons 44x44px, number 22px */}
+        <div className="flex items-center justify-center gap-2 h-[44px]">
+          <button
+            type="button"
+            onClick={handleStepMinus}
+            className="w-[44px] h-[44px] rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold text-lg flex items-center justify-center transition cursor-pointer active:scale-90 shadow-2xs select-none shrink-0"
+            title="Decrease 1 batch"
+          >
+            −
+          </button>
+
+          <div className="relative h-[44px]">
+            <input
+              type="number"
+              step="any"
+              min="0.1"
+              value={batchMultiplier}
+              onChange={(e) => {
+                const raw = e.target.value;
+                if (raw === '') {
+                  setBatchMultiplier('');
+                  return;
+                }
+                const val = parseFloat(raw);
+                if (!isNaN(val)) {
+                  setBatchMultiplier(val);
+                }
+              }}
+              onBlur={() => {
+                if (batchMultiplier === '' || batchMultiplier <= 0) {
+                  setBatchMultiplier(1);
+                }
+              }}
+              className="w-24 sm:w-28 h-[44px] text-center text-[22px] font-black font-mono text-slate-900 bg-white border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-2xs"
+            />
+          </div>
+
+          <button
+            type="button"
+            onClick={handleStepPlus}
+            className="w-[44px] h-[44px] rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold text-lg flex items-center justify-center transition cursor-pointer active:scale-90 shadow-2xs select-none shrink-0"
+            title="Increase 1 batch"
+          >
+            +
+          </button>
+        </div>
+
+        {/* Quick Chips: height 30px, 13px text, on one line */}
+        <div className="flex items-center justify-center gap-1.5 overflow-x-auto no-scrollbar flex-nowrap w-full py-0.5">
+          {[1, 5, 10, 25, 50].map((val) => (
+            <button
+              key={val}
+              type="button"
+              onClick={() => handleMultiplierChange(val)}
+              className={`h-[30px] px-2.5 sm:px-3 text-[13px] font-bold rounded-lg transition cursor-pointer active:scale-95 whitespace-nowrap shrink-0 flex items-center justify-center ${
+                batchMultiplier === val
+                  ? 'bg-indigo-600 text-white shadow-2xs'
+                  : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+              }`}
+            >
+              {val}
+            </button>
+          ))}
+
+          {feasibility.maxBatches > 0 && (
+            <button
+              type="button"
+              onClick={() => handleMultiplierChange(feasibility.maxBatches)}
+              className={`h-[30px] px-2.5 sm:px-3 text-[13px] font-bold rounded-lg transition cursor-pointer active:scale-95 whitespace-nowrap shrink-0 flex items-center justify-center ${
+                batchMultiplier === feasibility.maxBatches
+                  ? 'bg-emerald-600 text-white shadow-2xs'
+                  : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200'
+              }`}
+              title="Scale to maximum available inventory stock"
+            >
+              Max {feasibility.maxBatches}
+            </button>
+          )}
+        </div>
+
+        {/* Under Stepper: "Makes {output} {unit}" + "Set output instead" link */}
+        <div className="flex items-center justify-center gap-2 pt-1 text-xs text-slate-600">
+          <span>
+            Makes <strong className="text-slate-900 font-extrabold">{formatQty(resolvedYield, finishedUnit)} {finishedUnit}</strong>
+          </span>
+          <span className="text-slate-300">·</span>
+          <button
+            type="button"
+            onClick={() => setShowCustomYieldInput((v) => !v)}
+            className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 cursor-pointer underline"
+          >
+            {showCustomYieldInput ? 'Use standard yield' : 'Set output instead'}
+          </button>
+        </div>
+
+        {/* Collapsible Custom Output Input if toggled */}
+        {showCustomYieldInput && (
+          <div className="pt-2 animate-in fade-in duration-100">
+            <div className="p-3 bg-indigo-50/60 rounded-xl border border-indigo-200 flex items-center justify-between gap-3 text-xs">
+              <span className="font-semibold text-indigo-900">Custom Target Output:</span>
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="number"
+                  step="any"
+                  value={customYield}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    setCustomYield(raw === '' ? '' : parseFloat(raw) || 0);
+                  }}
+                  className="w-24 px-2 py-1 text-xs font-bold font-mono text-right bg-white border border-indigo-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  placeholder="e.g. 50"
+                />
+                <span className="font-bold text-indigo-800">{finishedUnit}</span>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* =====================================================================
+          4. MATERIALS TABLE (All materials in ONE compact table)
+      ===================================================================== */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
+        {/* Header: Line 1 = MATERIALS (count) · ALL OK, Line 2 = right-aligned buttons with gap of 8px (flex-wrap) */}
+        <div className="p-3 sm:p-3.5 border-b border-slate-200 flex flex-col gap-2 bg-slate-50/70 select-none">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span className="text-xs font-black uppercase tracking-wider text-slate-700 whitespace-nowrap">
+              MATERIALS ({adjustedIngredients.length})
+            </span>
+            <span className="text-slate-300">·</span>
+            {hasShortages ? (
+              <span className="text-xs font-bold text-rose-600 whitespace-nowrap">
+                {shortCount} SHORT
+              </span>
+            ) : (
+              <span className="text-xs font-bold text-emerald-700 whitespace-nowrap">
+                ALL OK
+              </span>
+            )}
+          </div>
+
+          <div className="flex items-center justify-end gap-2 flex-wrap">
+            {isEditingAmounts ? (
+              <>
+                <button
+                  type="button"
+                  onClick={handleResetToFormula}
+                  className="text-xs font-semibold text-slate-600 hover:text-slate-900 transition cursor-pointer px-1.5 py-1 whitespace-nowrap"
+                  title="Reset to formula"
+                >
+                  ↺ Reset to formula
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsEditingAmounts(false)}
+                  className="text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-lg border border-indigo-200 transition cursor-pointer whitespace-nowrap"
+                >
+                  Done
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setIsEditingAmounts(true)}
+                className="text-xs font-bold text-indigo-600 hover:text-indigo-800 transition cursor-pointer px-1.5 py-1 whitespace-nowrap"
+                title="Edit amounts"
               >
-                {recipes.map((r) => (
-                  <option key={r.id} value={r.id}>
-                    {r.name} (Yield: {r.yieldQuantity} {r.finishedItemName})
+                ✎ Edit amounts
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() => setIsAddingExtra((v) => !v)}
+              className="text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded-lg transition cursor-pointer whitespace-nowrap"
+              title="Add material"
+            >
+              ＋ Add
+            </button>
+          </div>
+        </div>
+
+        {/* Collapsible Inline Add Extra Material Bar */}
+        {isAddingExtra && (
+          <div className="p-3 bg-indigo-50/70 border-b border-indigo-200 space-y-2 animate-in fade-in duration-100">
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-bold text-indigo-900">Add Extra Raw Material / Product:</span>
+              <button
+                type="button"
+                onClick={() => setIsAddingExtra(false)}
+                className="text-slate-400 hover:text-slate-600 font-bold"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
+              <select
+                value={extraItemId}
+                onChange={(e) => setExtraItemId(e.target.value)}
+                className="flex-1 min-w-[180px] h-[38px] text-sm bg-white border border-indigo-200 rounded-lg px-2.5 text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              >
+                <option value="">-- Choose item --</option>
+                {items.map((i) => (
+                  <option key={i.id} value={i.id}>
+                    {i.name} ({formatQty(i.quantity, i.unit)} {i.unit} on hand)
                   </option>
                 ))}
               </select>
-            </div>
-
-            {/* Target Finished Item */}
-            <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-                Output Finished Product
-              </label>
-              <div className="flex items-center gap-2 p-2.5 bg-slate-50 border border-slate-200 rounded-xl">
-                <div className="w-7 h-7 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold text-xs shrink-0">
-                  <Package className="w-4 h-4" />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <span className="block text-xs font-bold text-slate-900 truncate">
-                    {finishedItem?.name || currentRecipe?.finishedItemName}
-                  </span>
-                  <span className="block text-[10px] text-slate-500">
-                    SKU: {finishedItem?.sku || 'N/A'} • On-hand: {finishedItem ? Number((getItemQuantity(finishedItem)).toFixed(2)) : 0} {finishedItem?.unit || 'units'}
-                  </span>
-                </div>
-              </div>
+              <input
+                type="number"
+                step="any"
+                min="0.01"
+                value={extraItemQty}
+                onChange={(e) => setExtraItemQty(parseFloat(e.target.value) || 1)}
+                className="w-20 h-9 text-xs font-bold font-mono text-right bg-white border border-indigo-200 rounded-lg px-2 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                placeholder="Qty"
+              />
+              <button
+                type="button"
+                onClick={handleAddExtraItem}
+                disabled={!extraItemId}
+                className="h-9 px-3.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition disabled:opacity-50 cursor-pointer shrink-0"
+              >
+                Add to Run
+              </button>
             </div>
           </div>
+        )}
 
-          {/* Batch Multiplier & Custom Output Yield */}
-          <div className="pt-3 border-t border-slate-100 space-y-3">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
-                  Batch Size / Multiplier
-                </label>
-                <p className="text-[11px] text-slate-400">
-                  Quickly scale formula or set custom output yield
-                </p>
-              </div>
+        {/* Table: Fixed layout 100%, column widths 38% | 16% | 18% | 28% */}
+        <div className="w-full overflow-hidden">
+          <table className="w-full table-fixed border-collapse text-[13px]">
+            <colgroup>
+              <col className="w-[38%]" />
+              <col className="w-[16%]" />
+              <col className="w-[18%]" />
+              <col className="w-[28%]" />
+            </colgroup>
+            <thead>
+              <tr className="border-b border-slate-200 bg-slate-50/90 text-[10px] font-extrabold uppercase tracking-wider text-slate-500 select-none">
+                <th className="py-2 pl-3 pr-1 text-left">Material</th>
+                <th className="py-2 px-1 text-right">/Batch</th>
+                <th className="py-2 pl-2 pr-1 text-right text-slate-700">Need</th>
+                <th className="py-2 pl-2 pr-3 text-right">Stock</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {ingredientStockAnalysis.length === 0 ? (
+                <tr>
+                  <td colSpan={4} className="py-8 text-center text-xs text-slate-400">
+                    No materials configured for this BOM. Tap &quot;＋ Add&quot; to add materials.
+                  </td>
+                </tr>
+              ) : (
+                ingredientStockAnalysis.map((ing, idx) => {
+                  const isShortage = !ing.isSufficient;
+                  const rowClass = isShortage
+                    ? 'bg-rose-50/80 text-rose-950 font-medium'
+                    : ing.isBelowMinAfter
+                    ? 'bg-amber-50/60 text-slate-900'
+                    : idx % 2 === 1
+                    ? 'bg-slate-50/40 text-slate-800'
+                    : 'bg-white text-slate-800';
 
-              {/* Multiplier Presets */}
-              <div className="flex items-center gap-1.5">
-                {[0.5, 1, 2, 4, 10].map((preset) => (
-                  <button
-                    key={preset}
-                    type="button"
-                    onClick={() => handleMultiplierChange(preset)}
-                    className={`px-2.5 py-1 text-xs font-bold rounded-lg transition cursor-pointer ${
-                      batchMultiplier === preset
-                        ? 'bg-indigo-600 text-white shadow-2xs'
-                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                    }`}
-                  >
-                    {preset}x
-                  </button>
-                ))}
-              </div>
-            </div>
+                  return (
+                    <tr key={ing.rawItemId} className={`h-[44px] transition hover:bg-indigo-50/30 ${rowClass}`}>
+                      {/* Column 1: MATERIAL (38%) */}
+                      <td className="py-1.5 pl-3 pr-1 min-w-0 align-middle">
+                        <div
+                          className="font-bold text-[13px] text-slate-900 line-clamp-2 leading-tight break-words"
+                          title={ing.rawItemName}
+                        >
+                          {ing.rawItemName}
+                          {ing.isExtra && (
+                            <span className="ml-1 px-1 py-0.2 rounded text-[9px] font-bold bg-indigo-100 text-indigo-700 inline-block align-middle">
+                              Extra
+                            </span>
+                          )}
+                        </div>
+                        {/* Unit under material name, small and grey */}
+                        <div className="flex items-center justify-between text-[11px] text-slate-400 mt-0.5 leading-none">
+                          <span className="truncate">
+                            {ing.unit}
+                            {isShortage ? (
+                              <span className="ml-1 text-rose-600 font-bold">
+                                · short by {formatTableNum(ing.shortage, false, ing.unit)}
+                              </span>
+                            ) : ing.isBelowMinAfter ? (
+                              <span className="ml-1 text-amber-600 font-medium">
+                                · leaves {formatTableNum(ing.remainingAfter, true, ing.unit)} (low)
+                              </span>
+                            ) : null}
+                          </span>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
-              {/* Batch Multiplier Input */}
-              <div>
-                <label className="block text-[11px] font-semibold text-slate-600 mb-1">
-                  Batch Scale Multiplier
-                </label>
-                <div className="relative">
-                  <input
-                    type="number"
-                    step="any"
-                    value={batchMultiplier}
-                    onChange={(e) => {
-                      const raw = e.target.value;
-                      if (raw === '') {
-                        setBatchMultiplier('');
-                        return;
-                      }
-                      const val = parseFloat(raw);
-                      if (!isNaN(val)) {
-                        setBatchMultiplier(val);
-                      }
-                    }}
-                    onBlur={() => {
-                      if (batchMultiplier === '' || batchMultiplier <= 0) {
-                        setBatchMultiplier(1);
-                      }
-                    }}
-                    placeholder="1"
-                    className="w-full text-xs font-bold bg-white border border-slate-200 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  />
-                  <span className="absolute right-3.5 top-2.5 text-xs font-bold text-slate-400">
-                    Multiplier (x)
-                  </span>
-                </div>
-              </div>
+                          {isEditingAmounts && (
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveIngredient(ing.rawItemId)}
+                              className="p-0.5 text-slate-400 hover:text-rose-600 transition cursor-pointer ml-1"
+                              title="Remove material from run"
+                            >
+                              <Trash2 className="w-3.5 h-3.5 text-rose-500" />
+                            </button>
+                          )}
+                        </div>
+                      </td>
 
-              {/* Direct Custom Yield Input */}
-              <div>
-                <label className="block text-[11px] font-semibold text-slate-600 mb-1">
-                  Adjusted Finished Output Yield <span className="text-emerald-700 font-bold">(Target Units)</span>
-                </label>
-                <div className="relative">
-                  <input
-                    type="number"
-                    step="any"
-                    value={customYield}
-                    onChange={(e) => {
-                      const raw = e.target.value;
-                      if (raw === '') {
-                        setCustomYield('');
-                        return;
-                      }
-                      const val = parseFloat(raw);
-                      if (!isNaN(val)) {
-                        setCustomYield(val);
-                      }
-                    }}
-                    className="w-full text-xs font-bold text-emerald-800 bg-emerald-50/50 border border-emerald-300 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                    placeholder="e.g. 10"
-                  />
-                  <span className="absolute right-3.5 top-2.5 text-xs font-bold text-emerald-700">
-                    {finishedItem?.unit || 'units'}
-                  </span>
-                </div>
-              </div>
-            </div>
+                      {/* Column 2: /BATCH (16%) */}
+                      <td className="py-1.5 px-1 text-right font-mono text-[12px] text-slate-500 tabular-nums whitespace-nowrap align-middle">
+                        {ing.isExtra ? '–' : formatTableNum(ing.standardQuantityPerBatch, false, ing.unit)}
+                      </td>
 
-            {/* Feasibility Indicator */}
-            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80 flex items-center justify-between text-xs text-slate-600">
-              <span className="flex items-center gap-1.5 font-medium">
-                <Info className="w-3.5 h-3.5 text-slate-400" />
-                <span>Catalog Stock Capacity:</span>
-              </span>
-              <span className="font-bold text-emerald-700">
-                Up to {feasibility.maxBatchesPossible} batches ({feasibility.maxUnitsPossible} {finishedItem?.unit || 'units'}) based on current raw stock
-              </span>
-            </div>
-          </div>
+                      {/* Column 3: NEED (18%) with 8px left padding */}
+                      <td className="py-1.5 pl-2 pr-1 text-right font-mono text-[12px] tabular-nums whitespace-nowrap align-middle">
+                        {isEditingAmounts ? (
+                          <input
+                            type="number"
+                            step="any"
+                            min="0"
+                            value={ing.quantity}
+                            onChange={(e) => {
+                              const val = parseFloat(e.target.value);
+                              handleUpdateIngredientQuantity(ing.rawItemId, isNaN(val) ? 0 : val);
+                            }}
+                            className={`w-full text-right text-[12px] font-mono font-bold px-1 py-0.5 rounded border focus:outline-none focus:ring-1 ${
+                              isShortage
+                                ? 'bg-rose-100 border-rose-300 text-rose-900 focus:ring-rose-500'
+                                : ing.isModified
+                                ? 'bg-amber-100 border-amber-300 text-amber-950 focus:ring-amber-500'
+                                : 'bg-white border-slate-300 text-slate-900 focus:ring-indigo-500'
+                            }`}
+                          />
+                        ) : (
+                          <span
+                            className={`font-bold ${
+                              isShortage
+                                ? 'text-rose-600'
+                                : ing.isModified
+                                ? 'bg-amber-100 text-amber-900 px-1 py-0.5 rounded'
+                                : 'text-slate-800'
+                            }`}
+                          >
+                            {formatTableNum(ing.quantity, false, ing.unit)}
+                          </span>
+                        )}
+                      </td>
+
+                      {/* Column 4: STOCK (28%) with 8px left padding */}
+                      <td
+                        className={`py-1.5 pl-2 pr-3 text-right font-mono text-[12px] tabular-nums whitespace-nowrap align-middle ${
+                          isShortage ? 'text-rose-700 font-bold' : 'text-slate-700 font-medium'
+                        }`}
+                      >
+                        {formatTableNum(ing.available, true, ing.unit)}
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
         </div>
+      </div>
 
-        {/* Card 2: Adjust Products & Quantities (Raw Materials & BOM) */}
-        <div className="bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 shadow-2xs space-y-4">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
-            <div>
-              <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                <Boxes className="w-4 h-4 text-indigo-600" />
-                <span>2. Adjust Products & Consumption Quantities</span>
-              </h2>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Adjust ingredient quantities up or down, add extra items, or customize consumption for this batch run
-              </p>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleResetToFormula}
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition cursor-pointer"
-                title="Reset all quantities back to standard formula ratio"
-              >
-                <RotateCcw className="w-3.5 h-3.5 text-slate-500" />
-                <span>Reset to Formula</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setIsAddingExtra((prev) => !prev)}
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg transition cursor-pointer"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                <span>+ Add Extra Material</span>
-              </button>
-            </div>
-          </div>
-
-          {/* Inline Extra Item Adder */}
-          {isAddingExtra && (
-            <div className="p-4 bg-indigo-50/70 border border-indigo-200 rounded-xl space-y-3 animate-in fade-in">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-indigo-900">
-                  Add Extra Inventory Product to this Run:
-                </span>
+      {/* =====================================================================
+          5. NOTES: Collapsed "＋ Add note" link
+      ===================================================================== */}
+      <div className="bg-white rounded-2xl border border-slate-200 p-3.5 sm:p-4 shadow-2xs">
+        {!isNotesOpen && !notes ? (
+          <button
+            type="button"
+            onClick={() => setIsNotesOpen(true)}
+            className="text-xs font-bold text-indigo-600 hover:text-indigo-800 flex items-center gap-1.5 cursor-pointer"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>＋ Add note</span>
+          </button>
+        ) : (
+          <div className="space-y-1.5 animate-in fade-in duration-100">
+            <div className="flex items-center justify-between text-xs font-bold text-slate-700">
+              <span>Production Notes & Observations:</span>
+              {!notes && (
                 <button
                   type="button"
-                  onClick={() => setIsAddingExtra(false)}
-                  className="text-indigo-600 hover:text-indigo-900 text-xs font-bold cursor-pointer"
+                  onClick={() => setIsNotesOpen(false)}
+                  className="text-slate-400 hover:text-slate-600 font-normal text-xs"
                 >
-                  Cancel
+                  Hide
                 </button>
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                <div className="sm:col-span-2">
-                  <select
-                    value={extraItemId}
-                    onChange={(e) => setExtraItemId(e.target.value)}
-                    className="w-full text-xs bg-white border border-indigo-200 rounded-lg px-3 py-2 text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  >
-                    <option value="">-- Choose Raw Material / Item --</option>
-                    {items
-                      .filter(
-                        (item) =>
-                          !adjustedIngredients.some((ing) => ing.rawItemId === item.id)
-                      )
-                      .map((item) => (
-                        <option key={item.id} value={item.id}>
-                          {item.name} (Stock: {item.quantity} {item.unit})
-                        </option>
-                      ))}
-                  </select>
-                </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    step="any"
-                    min="0.01"
-                    value={extraItemQty}
-                    onChange={(e) => setExtraItemQty(parseFloat(e.target.value) || 1)}
-                    className="w-24 text-xs font-bold bg-white border border-indigo-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    placeholder="Qty"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleAddExtraItem}
-                    disabled={!extraItemId}
-                    className="flex-1 px-3 py-2 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-2xs transition disabled:opacity-50 cursor-pointer"
-                  >
-                    Add Item
-                  </button>
-                </div>
-              </div>
+              )}
             </div>
-          )}
-
-          {/* List of Editable Ingredients */}
-          <div className="space-y-2.5">
-            {ingredientStockAnalysis.map((ing) => {
-              const isShortage = !ing.isSufficient;
-              const formattedAvailable = Number(ing.available.toFixed(3));
-
-              return (
-                <div
-                  key={ing.rawItemId}
-                  className={`p-3 sm:p-3.5 rounded-xl border transition ${
-                    isShortage
-                      ? 'bg-rose-50/60 border-rose-200'
-                      : ing.isExtra
-                      ? 'bg-indigo-50/40 border-indigo-200'
-                      : 'bg-slate-50/70 border-slate-200 hover:border-slate-300'
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    {/* Left: Product Name & Stock Info */}
-                    <div className="min-w-0 flex-1 space-y-0.5">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="font-bold text-slate-900 text-xs sm:text-sm truncate">
-                          {ing.rawItemName}
-                        </span>
-                        {ing.isExtra ? (
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-100 text-indigo-700">
-                            Extra Item
-                          </span>
-                        ) : (
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-200/80 text-slate-700">
-                            Std: {Number(ing.standardQuantityPerBatch.toFixed(3))} {ing.unit}/batch
-                          </span>
-                        )}
-                      </div>
-
-                      {/* Stock Status */}
-                      <div className="flex items-center gap-2 text-xs">
-                        <span className="text-slate-500">
-                          On-hand: <strong className="text-slate-700">{formattedAvailable} {ing.unit}</strong>
-                        </span>
-                        {isShortage && (
-                          <span className="font-bold text-rose-700 flex items-center gap-1">
-                            • <AlertTriangle className="w-3.5 h-3.5 text-rose-600 inline" />
-                            Shortage: {Number(ing.shortage.toFixed(3))} {ing.unit}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Right: Quantity Input & Delete Action */}
-                    <div className="flex items-center gap-2 shrink-0">
-                      {/* Editable Number Input */}
-                      <div className="relative w-28 sm:w-32">
-                        <input
-                          type="number"
-                          step="any"
-                          min="0"
-                          value={ing.quantity}
-                          onChange={(e) => {
-                            const val = parseFloat(e.target.value);
-                            handleUpdateIngredientQuantity(ing.rawItemId, isNaN(val) ? 0 : val);
-                          }}
-                          className={`w-full text-xs font-bold text-right pr-9 pl-2.5 py-1.5 rounded-lg border focus:outline-none focus:ring-2 ${
-                            isShortage
-                              ? 'bg-rose-50 border-rose-300 text-rose-900 focus:ring-rose-500'
-                              : 'bg-white border-slate-300 text-slate-900 focus:ring-indigo-500'
-                          }`}
-                        />
-                        <span className="absolute right-2 top-1.5 text-[10px] font-bold text-slate-400 pointer-events-none">
-                          {ing.unit}
-                        </span>
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={() => handleRemoveIngredient(ing.rawItemId)}
-                        className="p-1.5 text-slate-400 hover:text-rose-600 transition cursor-pointer rounded-lg hover:bg-rose-50"
-                        title="Remove ingredient from this run"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
+            <textarea
+              rows={2}
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder="e.g. Line 2 run, adjusted water and color ratio by +0.5 kg for viscosity..."
+              className="w-full text-xs bg-slate-50 border border-slate-200 rounded-xl p-2.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:bg-white transition"
+            />
           </div>
-        </div>
+        )}
+      </div>
 
-        {/* Card 3: Batch Observations & Notes */}
-        <div className="bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 shadow-2xs space-y-3">
-          <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-            <ClipboardCheck className="w-4 h-4 text-indigo-600" />
-            <span>3. Production Notes & Lot Observations</span>
-          </h2>
-          <textarea
-            rows={3}
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            className="w-full text-xs bg-slate-50 border border-slate-200 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition"
-            placeholder="e.g. Line 2 run, adjusted water and color ratio by +0.5 kg for viscosity..."
-          />
-        </div>
-
-        {/* Direct Execute Option (Only for users with audit rights) & Submission Actions */}
-        <div className="bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 shadow-2xs space-y-4">
-          {permissions.canAuditRequests && (
-            <div className="pb-3 border-b border-slate-100">
-              <label className="flex items-center gap-2.5 cursor-pointer text-xs">
+      {/* =====================================================================
+          6. STICKY BOTTOM BAR (Always visible)
+      ===================================================================== */}
+      <div className="fixed bottom-0 left-0 right-0 z-30 bg-white/95 backdrop-blur-xs border-t border-slate-200 p-3 sm:p-4 shadow-lg">
+        <div
+          style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+          className="max-w-3xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-3"
+        >
+          {/* Direct Execute Toggle (only for roles allowed today: canAuditRequests) */}
+          <div className="w-full sm:w-auto">
+            {permissions.canAuditRequests ? (
+              <label className="flex items-center gap-2 cursor-pointer text-xs select-none">
                 <input
                   type="checkbox"
                   checked={directApproval}
                   onChange={(e) => setDirectApproval(e.target.checked)}
-                  className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer"
+                  className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500 cursor-pointer"
                 />
-                <span className="font-semibold text-slate-800">
-                  Direct Execute (Bypass Audit Queue)
+                <span className="font-semibold text-slate-700">
+                  Direct execute (skip audit · managers only)
                 </span>
               </label>
-              <p className="text-[10px] text-slate-400 mt-0.5 pl-6">
-                Available for Managers and Owners with direct auditing authority.
-              </p>
-            </div>
-          )}
+            ) : (
+              <span className="text-[11px] text-slate-400 font-medium">
+                Standard audit request flow
+              </span>
+            )}
+          </div>
 
-          <div className="flex flex-col sm:flex-row items-center gap-3">
+          {/* Main Action Button */}
+          <div className="w-full sm:w-auto flex items-center gap-2">
             <button
-              type="submit"
-              disabled={isSubmitting || hasShortages || hasMissingMaterial || !!successMessage || adjustedIngredients.length === 0}
-              className={`flex-1 w-full py-3 px-4 rounded-xl text-xs font-bold text-white shadow-sm flex items-center justify-center gap-2 transition cursor-pointer ${
-                hasShortages || hasMissingMaterial || isSubmitting || !!successMessage
-                  ? 'bg-slate-400 cursor-not-allowed'
+              type="button"
+              onClick={handleSubmitProduction}
+              disabled={
+                isSubmitting ||
+                hasShortages ||
+                hasMissingMaterial ||
+                !!successMessage ||
+                adjustedIngredients.length === 0
+              }
+              className={`w-full sm:w-auto min-w-[240px] py-2.5 px-5 rounded-xl text-xs font-bold text-white shadow-xs flex items-center justify-center gap-2 transition active:scale-95 cursor-pointer ${
+                hasShortages || hasMissingMaterial || isSubmitting || !!successMessage || adjustedIngredients.length === 0
+                  ? 'bg-slate-300 text-slate-500 cursor-not-allowed shadow-none'
                   : directApproval
                   ? 'bg-emerald-600 hover:bg-emerald-700'
                   : 'bg-indigo-600 hover:bg-indigo-700'
@@ -840,32 +1138,131 @@ export const NewProductionRunPage: React.FC<NewProductionRunPageProps> = ({
             >
               {isSubmitting ? (
                 <span>Processing Run...</span>
+              ) : hasShortages ? (
+                <span className="flex items-center gap-1.5">
+                  <AlertTriangle className="w-3.5 h-3.5 text-slate-500" />
+                  <span>Fix shortages first</span>
+                </span>
               ) : directApproval ? (
                 <>
-                  <CheckCircle2 className="w-4 h-4" />
-                  <span>Execute Batch Run ({resolvedYield} Units)</span>
+                  <Sparkles className="w-4 h-4" />
+                  <span>
+                    Execute Now · {formatQty(resolvedYield, finishedUnit)} {finishedUnit}
+                  </span>
                 </>
               ) : (
                 <>
-                  <ClipboardCheck className="w-4 h-4" />
-                  <span>Submit for Audit ({resolvedYield} Units)</span>
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>
+                    Submit for Audit · {formatQty(resolvedYield, finishedUnit)} {finishedUnit}
+                  </span>
                 </>
               )}
             </button>
-
-            <button
-              type="button"
-              onClick={onBack}
-              disabled={isSubmitting}
-              className="w-full sm:w-auto py-3 px-5 rounded-xl text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 transition cursor-pointer"
-            >
-              Cancel & Return
-            </button>
           </div>
         </div>
-      </form>
+      </div>
+
+      {/* =====================================================================
+          RECIPE PICKER MODAL (Searchable list with photos)
+      ===================================================================== */}
+      {isRecipePickerOpen && (
+        <div
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsRecipePickerOpen(false);
+          }}
+          className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 animate-in fade-in duration-100"
+        >
+          <div className="bg-white rounded-2xl max-w-lg w-full max-h-[85vh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden animate-in zoom-in-95 duration-100">
+            {/* Modal Header */}
+            <div className="p-4 border-b border-slate-100 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Layers className="w-4 h-4 text-indigo-600" />
+                <h3 className="text-sm font-bold text-slate-900">Choose BOM</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsRecipePickerOpen(false)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Search Box */}
+            <div className="p-3 border-b border-slate-100 bg-slate-50">
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  autoFocus
+                  value={recipeSearchQuery}
+                  onChange={(e) => setRecipeSearchQuery(e.target.value)}
+                  placeholder="Search BOMs or items..."
+                  className="w-full h-9 pl-8 pr-3 text-xs bg-white border border-slate-300 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500 shadow-2xs"
+                />
+              </div>
+            </div>
+
+            {/* BOM List */}
+            <div className="p-3 overflow-y-auto divide-y divide-slate-100 flex-1 space-y-1">
+              {filteredPickerRecipes.length === 0 ? (
+                <div className="py-8 text-center text-xs text-slate-400">
+                  No BOMs found matching &quot;{recipeSearchQuery}&quot;
+                </div>
+              ) : (
+                filteredPickerRecipes.map((r) => {
+                  const targetItem =
+                    items.find((i) => i.id === r.finishedItemId) ||
+                    resolveInventoryItem(items, { id: r.finishedItemId, name: r.finishedItemName });
+                  const isSelected = r.id === selectedRecipeId;
+
+                  return (
+                    <div
+                      key={r.id}
+                      onClick={() => {
+                        setSelectedRecipeId(r.id);
+                        setIsRecipePickerOpen(false);
+                      }}
+                      className={`p-2.5 rounded-xl flex items-center justify-between gap-3 cursor-pointer transition hover:bg-slate-50 ${
+                        isSelected ? 'bg-indigo-50/60 border border-indigo-200' : ''
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                        <div className="w-10 h-10 rounded-lg bg-slate-100 border border-slate-200 overflow-hidden flex items-center justify-center shrink-0">
+                          {targetItem?.photoThumb ? (
+                            <img
+                              src={targetItem.photoThumb}
+                              alt={r.name}
+                              className="w-full h-full object-contain p-0.5"
+                            />
+                          ) : (
+                            <Package className="w-5 h-5 text-slate-400" />
+                          )}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <span className="font-bold text-xs text-slate-900 block truncate">
+                            {r.name}
+                          </span>
+                          <span className="text-[10px] text-slate-500 block truncate">
+                            Yield: {formatQty(r.yieldQuantity, targetItem?.unit)} {targetItem?.unit || 'units'} · {r.ingredients?.length || 0} materials
+                          </span>
+                        </div>
+                      </div>
+
+                      {isSelected && (
+                        <div className="w-6 h-6 rounded-full bg-indigo-600 text-white flex items-center justify-center shrink-0">
+                          <Check className="w-3.5 h-3.5" />
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
-
-

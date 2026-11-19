@@ -47,7 +47,7 @@ export function saleInvoicePdf(sale: Sale): Blob {
   const extra: string[] = [];
   if (sale.vehicleNumber) extra.push(`Vehicle: ${sale.vehicleNumber}`);
   if (sale.trackingNumber) extra.push(`LR / Tracking: ${sale.trackingNumber}`);
-  extra.push(`Status: ${sale.status.toUpperCase()}`);
+  if (sale.status === 'cancelled') extra.push('Status: CANCELLED');
   party(pdf, 'Bill to', sale.customer, extra);
   pdf.table(
     [
@@ -60,9 +60,9 @@ export function saleInvoicePdf(sale: Sale): Blob {
     sale.lines.map((l) => [
       l.itemName + (l.sku ? ` (${l.sku})` : ''),
       `${l.quantity} ${l.unit}`,
-      pdfMoney(l.rate).replace('Rs. ', ''),
+      l.rate === 0 ? 'FREE' : pdfMoney(l.rate).replace('Rs. ', ''),
       l.discountPct ? `${l.discountPct}%` : '-',
-      pdfMoney(l.amount).replace('Rs. ', ''),
+      l.rate === 0 ? 'FREE' : pdfMoney(l.amount).replace('Rs. ', ''),
     ])
   );
   pdf.gap(10);
@@ -168,3 +168,60 @@ export function purchaseReturnPdf(ret: PurchaseReturn, po?: Purchase): Blob {
   footer(pdf, [ret.notes ? `Notes: ${ret.notes}` : '', 'Goods returned to the supplier. This amount is debited to the supplier.'].filter(Boolean));
   return pdf.toBlob();
 }
+
+export interface StatementKhataRow {
+  date: string;
+  detail: string;
+  billAmount: number | null;
+  paidAmount: number | null;
+  balanceAfter: number;
+}
+
+export function customerStatementPdf(params: {
+  customer: { name: string; phone?: string; address?: string };
+  totalBought: number;
+  totalPaid: number;
+  totalReturns: number;
+  balanceDue: number;
+  rows: StatementKhataRow[];
+}): Blob {
+  const { customer, totalBought, totalPaid, totalReturns, balanceDue, rows } = params;
+  const pdf = new PdfDoc();
+  header(pdf, 'CUSTOMER STATEMENT', 'KHATA', pdfDate(new Date().toISOString()));
+  party(pdf, 'Customer Account', customer, [
+    `Total Bought: ${pdfMoney(totalBought)}`,
+    `Total Paid: ${pdfMoney(totalPaid)}`,
+    ...(totalReturns > 0 ? [`Returns: ${pdfMoney(totalReturns)}`] : []),
+    `${balanceDue >= 0 ? 'Balance Due' : 'Advance'}: ${pdfMoney(Math.abs(balanceDue))}`,
+  ]);
+
+  pdf.table(
+    [
+      { title: 'Date', frac: 0.14 },
+      { title: 'Detail', frac: 0.41 },
+      { title: 'Bill', frac: 0.15, align: 'right' },
+      { title: 'Paid / Cr', frac: 0.15, align: 'right' },
+      { title: 'Balance', frac: 0.15, align: 'right' },
+    ],
+    rows.map((r) => [
+      pdfDate(r.date),
+      r.detail,
+      r.billAmount !== null && r.billAmount > 0 ? pdfMoney(r.billAmount).replace('Rs. ', '') : '-',
+      r.paidAmount !== null && r.paidAmount > 0 ? pdfMoney(r.paidAmount).replace('Rs. ', '') : '-',
+      pdfMoney(r.balanceAfter).replace('Rs. ', ''),
+    ]),
+    8.5
+  );
+
+  pdf.gap(12);
+  pdf.totals([
+    { label: 'Total Bought', value: pdfMoney(totalBought) },
+    ...(totalReturns > 0 ? [{ label: 'Less: Returns', value: `- ${pdfMoney(totalReturns)}` }] : []),
+    { label: 'Total Paid', value: `- ${pdfMoney(totalPaid)}` },
+    { label: balanceDue >= 0 ? 'Balance Due' : 'Advance', value: pdfMoney(Math.abs(balanceDue)), bold: true },
+  ]);
+
+  footer(pdf, ['Thank you for your business with Power Track Industries (Welten).']);
+  return pdf.toBlob();
+}
+

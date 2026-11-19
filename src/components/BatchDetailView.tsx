@@ -22,6 +22,8 @@ import { ProductionBatch } from '../types/inventory';
 import { useInventory } from '../context/InventoryContext';
 import { useAuth } from '../context/AuthContext';
 import { formatFirestoreError } from '../firebase/config';
+import { formatQty, formatInrAmount, formatShortDateTime } from '../utils/numberFormat';
+import { canChangeEntry, formatLockReason } from '../utils/changeWindow';
 
 interface BatchDetailViewProps {
   batchId: string;
@@ -29,8 +31,8 @@ interface BatchDetailViewProps {
 }
 
 export const BatchDetailView: React.FC<BatchDetailViewProps> = ({ batchId, onBack }) => {
-  const { batches, voidBatch, items } = useInventory();
-  const { permissions, role } = useAuth();
+  const { batches, voidBatch, items, showActionToast } = useInventory();
+  const { permissions, role, realUserUid } = useAuth();
 
   // Find latest batch object from state
   const batch = batches.find((b) => b.id === batchId);
@@ -67,24 +69,19 @@ export const BatchDetailView: React.FC<BatchDetailViewProps> = ({ batchId, onBac
         <button
           type="button"
           onClick={onBack}
-          className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-indigo-600 rounded-xl hover:bg-indigo-700 transition cursor-pointer"
+          className="inline-flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-800 transition cursor-pointer"
         >
-          <ArrowLeft className="w-4 h-4" />
-          <span>Return to Batch Production</span>
+          <ArrowLeft className="w-4 h-4 shrink-0" />
+          <span>Production</span>
         </button>
       </div>
     );
   }
 
-  const dateFormatted = new Date(batch.timestamp).toLocaleDateString(undefined, {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-  });
-  const timeFormatted = new Date(batch.timestamp).toLocaleTimeString(undefined, {
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+  const finishedItem = items.find((i) => i.id === batch.finishedItemId);
+  const finishedUnit = finishedItem?.unit || 'units';
+
+  const batchTimestampFormatted = formatShortDateTime(batch.timestamp);
 
   const canVoid = (role === 'admin' || role === 'manager') && !batch.isVoid;
 
@@ -93,23 +90,36 @@ export const BatchDetailView: React.FC<BatchDetailViewProps> = ({ batchId, onBac
       setVoidError('Please enter a reason for voiding this batch.');
       return;
     }
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      setVoidError('No internet connection — nothing was saved. Please try again.');
+      return;
+    }
 
-    setIsVoiding(true);
+    const targetId = batch.id;
+    const targetName = batch.recipeName;
+    const reason = voidReason.trim();
+    setShowVoidModal(false);
+    setVoidReason('');
     setVoidError(null);
+    setIsVoiding(false);
 
-    const res = await voidBatch(batch.id, voidReason.trim());
+    showActionToast('Saving…', `Voiding ${targetName}`, 'saving');
+    const res = await voidBatch(targetId, reason);
     if (res.success) {
+      showActionToast('Batch voided', `${targetName} stock reversed`, 'success');
       setStatusMessage({
         type: 'success',
-        text: `Batch #${batch.id} was successfully voided and inventory was reversed.`,
+        text: `Batch #${targetId} was successfully voided and inventory was reversed.`,
       });
-      setShowVoidModal(false);
-      setVoidReason('');
       setTimeout(() => setStatusMessage(null), 4000);
     } else {
-      setVoidError(res.error || 'Failed to void batch run.');
+      const errMsg = res.error || 'Failed to void batch run.';
+      showActionToast('Could not void batch', errMsg, 'error');
+      setStatusMessage({
+        type: 'error',
+        text: errMsg,
+      });
     }
-    setIsVoiding(false);
   };
 
   return (
@@ -146,7 +156,7 @@ export const BatchDetailView: React.FC<BatchDetailViewProps> = ({ batchId, onBac
             <div>
               <h3 className="text-base font-bold text-slate-900">Void Batch Run #{batch.id}?</h3>
               <p className="text-xs text-slate-500 mt-1">
-                This will deduct <strong className="text-slate-800">+{batch.quantityProduced} {batch.finishedItemName}</strong> from inventory and restore all deducted raw materials back into stock.
+                This will deduct <strong className="text-slate-800">+{formatQty(batch.quantityProduced, finishedUnit)} {batch.finishedItemName}</strong> from inventory and restore all deducted raw materials back into stock.
               </p>
 
               <div className="mt-3">
@@ -161,7 +171,7 @@ export const BatchDetailView: React.FC<BatchDetailViewProps> = ({ batchId, onBac
                     setVoidReason(e.target.value);
                     if (voidError) setVoidError(null);
                   }}
-                  placeholder="e.g. Test batch, contaminated ingredients, wrong recipe"
+                  placeholder="e.g. Wrong BOM quantity, damaged plates, operator error"
                   className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-rose-500"
                 />
               </div>
@@ -204,27 +214,53 @@ export const BatchDetailView: React.FC<BatchDetailViewProps> = ({ batchId, onBac
         <button
           type="button"
           onClick={onBack}
-          className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 hover:text-slate-900 bg-white border border-slate-200 hover:bg-slate-50 rounded-xl transition cursor-pointer active:scale-95 shadow-2xs"
+          className="inline-flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-800 transition cursor-pointer"
         >
-          <ArrowLeft className="w-4 h-4" />
-          <span>Back to Production Runs</span>
+          <ArrowLeft className="w-4 h-4 shrink-0" />
+          <span>Production</span>
         </button>
 
-        <div className="flex items-center gap-2">
-          {canVoid && (
-            <button
-              type="button"
-              onClick={() => {
-                setShowVoidModal(true);
-                setVoidReason('');
-                setVoidError(null);
-              }}
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-xl transition cursor-pointer active:scale-95"
-            >
-              <Ban className="w-3.5 h-3.5" />
-              <span>Void Batch</span>
-            </button>
-          )}
+        <div className="flex flex-col items-end gap-0.5">
+          {canVoid && (() => {
+            const changeCheck = canChangeEntry(
+              {
+                createdByUid: batch.performedBy,
+                createdByName: batch.performedByName,
+                createdAt: batch.timestamp,
+              },
+              realUserUid,
+              permissions,
+              role
+            );
+            if (!changeCheck.allowed) {
+              return (
+                <span className="text-[11px] text-slate-400 text-right">
+                  {formatLockReason(changeCheck.reason)}
+                </span>
+              );
+            }
+            return (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowVoidModal(true);
+                    setVoidReason('');
+                    setVoidError(null);
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-xl transition cursor-pointer active:scale-95"
+                >
+                  <Ban className="w-3.5 h-3.5" />
+                  <span>Void Batch</span>
+                </button>
+                {role !== 'admin' && changeCheck.timeLeftLabel && (
+                  <span className="text-[10px] text-slate-400">
+                    Can change for {changeCheck.timeLeftLabel} more
+                  </span>
+                )}
+              </>
+            );
+          })()}
         </div>
       </div>
 
@@ -271,7 +307,7 @@ export const BatchDetailView: React.FC<BatchDetailViewProps> = ({ batchId, onBac
               </span>
             </div>
             <p className="text-xs text-rose-700 mt-1">
-              Voided on {new Date(batch.voidedAt || batch.timestamp).toLocaleString()} by{' '}
+              Voided on {formatShortDateTime(batch.voidedAt || batch.timestamp)} by{' '}
               <strong>{batch.voidedByName || 'Admin'}</strong>.
             </p>
             {batch.voidReason && (
@@ -317,7 +353,7 @@ export const BatchDetailView: React.FC<BatchDetailViewProps> = ({ batchId, onBac
           <div className="text-xs text-slate-500 sm:text-right shrink-0">
             <div className="flex items-center gap-1 font-medium text-slate-700 sm:justify-end">
               <Calendar className="w-3.5 h-3.5 text-slate-400" />
-              <span>{dateFormatted} at {timeFormatted}</span>
+              <span>{batchTimestampFormatted}</span>
             </div>
             <div className="text-[11px] text-slate-400 mt-0.5 flex items-center gap-1 sm:justify-end">
               <User className="w-3 h-3 text-slate-400" />
@@ -331,7 +367,7 @@ export const BatchDetailView: React.FC<BatchDetailViewProps> = ({ batchId, onBac
           <div className="p-3 bg-slate-50 rounded-xl border border-slate-200/80">
             <span className="text-[11px] text-slate-500 font-medium block">Quantity Produced</span>
             <span className={`text-base font-bold ${batch.isVoid ? 'text-slate-400 line-through' : 'text-emerald-700'}`}>
-              +{batch.quantityProduced}
+              +{formatQty(batch.quantityProduced, finishedUnit)}
             </span>
             <span className="text-[10px] text-slate-400 block truncate">
               {batch.finishedItemName}
@@ -355,11 +391,11 @@ export const BatchDetailView: React.FC<BatchDetailViewProps> = ({ batchId, onBac
           <div className="p-3 bg-slate-50 rounded-xl border border-slate-200/80">
             <span className="text-[11px] text-slate-500 font-medium block">Total Batch Cost</span>
             <span className="text-base font-bold text-slate-900">
-              {permissions.canViewFinances ? `₹${Number(batch.totalBatchCost || 0).toFixed(2)}` : '[Restricted]'}
+              {permissions.canViewFinances ? formatInrAmount(batch.totalBatchCost || 0, 2) : '[Restricted]'}
             </span>
             <span className="text-[10px] text-slate-400 block">
               {permissions.canViewCostPerUnit && batch.quantityProduced > 0
-                ? `₹${(batch.totalBatchCost / batch.quantityProduced).toFixed(2)} / unit`
+                ? `${formatInrAmount(batch.totalBatchCost / batch.quantityProduced, 2)} / unit`
                 : ''}
             </span>
           </div>
@@ -389,11 +425,11 @@ export const BatchDetailView: React.FC<BatchDetailViewProps> = ({ batchId, onBac
               </div>
               <div className="text-right">
                 <span className={`font-bold ${batch.isVoid ? 'text-slate-400 line-through' : 'text-rose-700'}`}>
-                  -{mat.quantity} {mat.unit}
+                  -{formatQty(mat.quantity, mat.unit)} {mat.unit}
                 </span>
                 {permissions.canViewCostPerUnit && (
                   <span className="text-[11px] text-slate-400 block">
-                    @ ₹{Number(mat.unitCost || 0).toFixed(2)}/{mat.unit}
+                    @ {formatInrAmount(mat.unitCost || 0, 2)}/{mat.unit}
                   </span>
                 )}
               </div>

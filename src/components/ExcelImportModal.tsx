@@ -486,7 +486,7 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({ isOpen, onCl
             <div className="space-y-2 pt-1">
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-bold text-slate-700 uppercase tracking-wider">
-                  Spreadsheet Preview ({parsedItems.length} Products)
+                  Spreadsheet Preview ({parsedItems.length} Items)
                 </span>
                 <span className="text-[11px] text-slate-500">
                   {parsedItems.filter((i) => i.isValid).length} Valid
@@ -606,7 +606,7 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({ isOpen, onCl
                 ) : (
                   <>
                     <Boxes className="w-3.5 h-3.5" />
-                    <span>Import {parsedItems.filter((i) => i.isValid).length} Products</span>
+                    <span>Import {parsedItems.filter((i) => i.isValid).length} items</span>
                   </>
                 )}
               </button>

@@ -14,9 +14,9 @@ export default defineConfig(() => {
         includeAssets: ['icon.svg', 'apple-touch-icon.png', 'pwa-192x192.png', 'pwa-512x512.png', 'pti-logo.png', 'logo.png'],
         manifest: {
           id: '/',
-          name: 'Power Track - Real-Time Inventory & Recipe Management',
+          name: 'Power Track – Battery Inventory & Production',
           short_name: 'Power Track',
-          description: 'Multi-device real-time stock and inventory management with role-based access control and manufacturing batch ledger.',
+          description: 'Multi-device real-time battery stock, BOM material consumption, and production batch management for Power Track Industries (brand Welten).',
           theme_color: '#0f172a',
           background_color: '#0f172a',
           display: 'standalone',

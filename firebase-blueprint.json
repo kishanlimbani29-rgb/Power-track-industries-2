@@ -61,6 +61,8 @@
         "sellingPrice": { "type": "number", "description": "Retail selling price for finished goods" },
         "supplier": { "type": "string", "maxLength": 100, "description": "Primary supplier name" },
         "location": { "type": "string", "maxLength": 60, "description": "Storage warehouse, aisle or shelf" },
+        "photoThumb": { "type": "string", "maxLength": 35000, "description": "160px JPEG base64 dataURL thumbnail" },
+        "photoUpdatedAt": { "type": "string", "description": "Timestamp when product photo was last uploaded or modified" },
         "notes": { "type": "string", "maxLength": 500, "description": "Additional notes" },
         "createdAt": { "type": "string", "description": "Creation timestamp" },
         "updatedAt": { "type": "string", "description": "Last update timestamp" },
@@ -135,8 +137,69 @@
       "properties": {
         "permissions": { "type": "object", "description": "Map of role key to capability permissions" },
         "customRoles": { "type": "array", "description": "List of custom defined roles" },
-        "updatedAt": { "type": "string", "description": "ISO timestamp of last configuration update" }
       }
+    },
+    "ItemPhoto": {
+      "title": "ItemPhoto",
+      "description": "Full resolution product image stored as JPEG dataUrl under 300KB",
+      "type": "object",
+      "properties": {
+        "dataUrl": { "type": "string", "maxLength": 400000, "description": "Max 1000px JPEG dataUrl" },
+        "updatedAt": { "type": "string", "description": "ISO timestamp of last update" },
+        "updatedBy": { "type": "string", "description": "User ID of uploader" }
+      },
+      "required": ["dataUrl", "updatedAt", "updatedBy"]
+    },
+    "BatteryCheck": {
+      "title": "BatteryCheck",
+      "description": "Warranty / service battery check intake and resolution records",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Battery check document ID" },
+        "partyName": { "type": "string", "maxLength": 150, "description": "Customer party name" },
+        "partyPhone": { "type": "string", "maxLength": 40, "description": "Customer phone" },
+        "itemId": { "type": "string", "description": "Inventory item ID" },
+        "itemName": { "type": "string", "maxLength": 150, "description": "Inventory item name" },
+        "quantity": { "type": "number", "description": "Quantity received for check" },
+        "serial": { "type": "string", "maxLength": 120, "description": "Optional serial or batch number" },
+        "problem": { "type": "string", "maxLength": 400, "description": "Reported problem description" },
+        "receivedAt": { "type": "string", "description": "ISO timestamp or date received" },
+        "status": {
+          "type": "string",
+          "enum": ["checking", "ok_returned", "replaced", "repaired_returned", "taken_back"],
+          "description": "Battery check resolution status"
+        },
+        "resultNote": { "type": "string", "maxLength": 500, "description": "Optional check result note" },
+        "resolvedAt": { "type": "string", "description": "ISO timestamp resolved" },
+        "resolvedBy": { "type": "string", "description": "User ID who resolved check" },
+        "resolvedByName": { "type": "string", "description": "Display name of resolver" },
+        "linkedSaleIds": { "type": "array", "description": "Linked invoice IDs when taken back" },
+        "creditAmount": { "type": "number", "description": "Credit note total reduced on take back" },
+        "createdBy": { "type": "string", "description": "User ID who received check" },
+        "createdByName": { "type": "string", "description": "Display name of receiver" }
+      },
+      "required": ["id", "partyName", "itemId", "itemName", "quantity", "problem", "receivedAt", "status", "createdBy"]
+    },
+    "CustomerAdvance": {
+      "title": "CustomerAdvance",
+      "description": "Customer advance payments kept on account and applied to future invoices",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Advance document ID" },
+        "partyKey": { "type": "string", "description": "Normalized customer key (phone:... or name:...)" },
+        "partyName": { "type": "string", "maxLength": 150, "description": "Customer name" },
+        "partyPhone": { "type": "string", "maxLength": 40, "description": "Optional customer phone" },
+        "amount": { "type": "number", "description": "Original advance amount received" },
+        "remaining": { "type": "number", "description": "Unapplied advance remaining" },
+        "mode": { "type": "string", "enum": ["cash", "upi", "bank", "cheque", "advance", "other"], "description": "Payment mode" },
+        "date": { "type": "string", "description": "Date yyyy-mm-dd" },
+        "note": { "type": "string", "maxLength": 300, "description": "Optional reference note" },
+        "uses": { "type": "array", "description": "Invoices to which this advance was applied" },
+        "createdAt": { "type": "string", "description": "ISO timestamp of creation" },
+        "createdBy": { "type": "string", "description": "User ID of creator" },
+        "createdByName": { "type": "string", "description": "Display name of creator" }
+      },
+      "required": ["id", "partyKey", "partyName", "amount", "remaining", "mode", "date", "uses", "createdAt", "createdBy"]
     }
   },
   "firestore": {
@@ -171,6 +234,18 @@
     "/audit_requests/{requestId}": {
       "schema": { "$ref": "#/entities/AuditRequest" },
       "description": "Audit requests queue for stock and production governance"
+    },
+    "/item_photos/{itemId}": {
+      "schema": { "$ref": "#/entities/ItemPhoto" },
+      "description": "Full-size lazy loaded product photos"
+    },
+    "/battery_checks/{checkId}": {
+      "schema": { "$ref": "#/entities/BatteryCheck" },
+      "description": "Battery warranty check intake and resolution records"
+    },
+    "/customer_advances/{advanceId}": {
+      "schema": { "$ref": "#/entities/CustomerAdvance" },
+      "description": "Customer advance payments and invoice usage records"
     }
   }
 }

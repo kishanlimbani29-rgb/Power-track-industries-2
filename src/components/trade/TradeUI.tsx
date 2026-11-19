@@ -3,6 +3,7 @@ import { X, AlertTriangle, CheckCircle2, FileText, Share2, Loader2 } from 'lucid
 import { PartyInfo, PaymentMode } from '../../types/inventory';
 import { formatINR, round2, todayISODate } from '../../utils/tradeMath';
 import { shareOrDownloadPdf } from '../../utils/tradePdf';
+import { formatDate as formatSharedDate, formatDateTime as formatSharedDateTime } from '../../utils/numberFormat';
 import type { PartySuggestion, PaymentInput } from '../../context/TradeContext';
 
 // Full class strings (Tailwind can't see classes built with string templates).
@@ -100,6 +101,7 @@ export const Sheet: React.FC<{
     <div className="fixed inset-0 z-50 bg-slate-950/60 flex items-end sm:items-center justify-center sm:p-4" onClick={onClose}>
       <div
         className={`bg-white w-full ${wide ? 'sm:max-w-2xl' : 'sm:max-w-lg'} rounded-t-3xl sm:rounded-3xl max-h-[92vh] flex flex-col shadow-2xl overflow-hidden`}
+        style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="p-4 bg-slate-900 text-white flex items-center gap-3 shrink-0">
@@ -229,7 +231,11 @@ export function useToast() {
     timer.current = setTimeout(() => setToast(null), 3500);
   };
   const view = toast ? (
-    <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-[70] w-[calc(100vw-2rem)] max-w-sm bg-slate-900 text-white px-4 py-3 rounded-2xl shadow-2xl flex items-start gap-3" role="status">
+    <div
+      className="fixed left-1/2 -translate-x-1/2 z-[70] w-[calc(100vw-2rem)] max-w-sm bg-slate-900 text-white px-4 py-3 rounded-2xl shadow-2xl flex items-start gap-3"
+      style={{ bottom: 'calc(1.25rem + env(safe-area-inset-bottom))' }}
+      role="status"
+    >
       {toast.error ? <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" /> : <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />}
       <div className="min-w-0">
         <div className="text-xs font-bold">{toast.title}</div>
@@ -416,9 +422,5 @@ export const LoadMore: React.FC<{ show: boolean; onClick: () => void }> = ({ sho
     </div>
   ) : null;
 
-export const fmtDate = (iso?: string) =>
-  iso
-    ? new Date(iso.length === 10 ? `${iso}T00:00:00` : iso).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
-    : '';
-export const fmtDateTime = (iso?: string) =>
-  iso ? new Date(iso).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+export const fmtDate = (iso?: string) => (iso ? formatSharedDate(iso) : '');
+export const fmtDateTime = (iso?: string) => (iso ? formatSharedDateTime(iso) : '');

@@ -149,6 +149,8 @@ service cloud.firestore {
     function canEditSales() { return hasPerm('canEditSales', ['manager']); }
     function canDeleteSales() { return hasPerm('canDeleteSales', ['manager']); }
     function canRecordPayments() { return hasPerm('canRecordPayments', ['manager']); }
+    function canEditPayments() { return hasPerm('canEditPayments', ['manager']); }
+    function canDeletePayments() { return hasPerm('canDeletePayments', ['manager']); }
     function canCreateSalesReturn() { return hasPerm('canCreateSalesReturn', ['manager']); }
     function canEditSalesReturn() { return hasPerm('canEditSalesReturn', ['manager']); }
     function canDeleteSalesReturn() { return hasPerm('canDeleteSalesReturn', ['manager']); }
@@ -226,8 +228,11 @@ service cloud.firestore {
       allow delete: if canDeleteItems() && isValidId(itemId);
       allow update: if isValidId(itemId) && (
         canEditItems() || (
+          canEditItems() &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['photoThumb', 'photoUpdatedAt', 'updatedAt', 'lastUpdatedBy'])
+        ) || (
           (canEditItems() || canAuditRequests()) &&
-          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['quantity', 'unitCost', 'location', 'updatedAt', 'lastUpdatedBy', 'lastMovementReason', 'lastMovementType'])
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['quantity', 'unitCost', 'location', 'updatedAt', 'lastUpdatedBy', 'lastMovementReason', 'lastMovementType', 'photoThumb', 'photoUpdatedAt'])
         ) || (
           (canAdjustStock() || canProduceBatch() || canAuditRequests() || canMoveStockForTrade()) &&
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['quantity', 'updatedAt', 'lastUpdatedBy', 'lastMovementReason', 'lastMovementType'])
@@ -236,6 +241,16 @@ service cloud.firestore {
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['quantity', 'unitCost', 'updatedAt', 'lastUpdatedBy', 'lastMovementReason', 'lastMovementType'])
         )
       );
+    }
+
+    // 3b. Item product photos (full-res photo lazy loaded only on zoom)
+    match /item_photos/{itemId} {
+      allow get: if (isProfileActive() || isAdmin()) && isValidId(itemId);
+      allow list: if (isProfileActive() || isAdmin());
+      allow create, update: if canEditItems() && isValidId(itemId) &&
+        request.resource.data.dataUrl is string &&
+        request.resource.data.dataUrl.size() < 400000;
+      allow delete: if canEditItems() && isValidId(itemId);
     }
 
     // 4. Recipes (Bill of Materials)
@@ -253,7 +268,9 @@ service cloud.firestore {
       allow create: if (canAdjustStock() || canProduceBatch() || canEditItems() || canAuditRequests() || canMoveStockForTrade()) &&
         isValidId(movementId) &&
         request.resource.data.get('performedBy', '') == request.auth.uid;
-      allow update, delete: if false; // Strict immutable audit ledger
+      allow update: if false; // Strict immutable audit ledger
+      // Only Inventory Full roles may remove a wrong manual entry
+      allow delete: if canDeleteItems() && canAdjustStock() && isValidId(movementId);
     }
 
     // 6. Production batches ledger - Append-only with authorized voiding only
@@ -304,33 +321,32 @@ service cloud.firestore {
       allow list: if canViewSales();
       allow create: if canCreateSales() && isValidId(saleId) &&
         request.resource.data.createdBy == request.auth.uid &&
-        request.resource.data.status == 'confirmed' &&
+        request.resource.data.status in ['confirmed', 'delivered'] &&
         request.resource.data.amountPaid == 0 &&
         request.resource.data.returnsTotal == 0;
       allow update: if isValidId(saleId) && (
         // Edit sale by authorized user
         (
-          canEditSales() && resource.data.status in ['confirmed', 'dispatched'] &&
-          onlyChanges(['customer', 'lines', 'subtotal', 'gstTotal', 'grandTotal', 'vehicleNumber', 'trackingNumber', 'notes', 'updatedAt'])
+          canEditSales() && resource.data.status != 'cancelled' &&
+          onlyChanges(['customer', 'lines', 'subtotal', 'gstTotal', 'grandTotal', 'paymentStatus', 'vehicleNumber', 'trackingNumber', 'notes', 'updatedAt'])
         ) ||
-        // Status: confirmed -> dispatched/delivered/cancelled, dispatched -> delivered/cancelled
+        // Cancel any non-cancelled invoice with 0 payments & 0 returns
         (
-          canCreateSales() &&
-          onlyChanges(['status', 'dispatchedAt', 'deliveredAt', 'cancelledAt', 'cancelledBy', 'cancelReason', 'paymentStatus', 'updatedAt']) &&
-          (
-            (resource.data.status == 'confirmed' && request.resource.data.status in ['dispatched', 'delivered', 'cancelled']) ||
-            (resource.data.status == 'dispatched' && request.resource.data.status in ['delivered', 'cancelled'])
-          ) &&
-          (request.resource.data.status != 'cancelled' || (resource.data.amountPaid == 0 && resource.data.returnsTotal == 0))
+          canCreateSales() && resource.data.status != 'cancelled' &&
+          request.resource.data.status == 'cancelled' &&
+          resource.data.amountPaid == 0 && resource.data.returnsTotal == 0 &&
+          onlyChanges(['status', 'cancelledAt', 'cancelledBy', 'cancelReason', 'paymentStatus', 'updatedAt'])
         ) ||
-        // Payments and refunds
+        // Payments, refunds, and editing/removing payments (plus applying customer advances on new/edited sales)
         (
-          canRecordPayments() && resource.data.status != 'cancelled' &&
+          (canRecordPayments() || canEditPayments() || canDeletePayments() || canCreateSales() || canEditSales()) &&
+          resource.data.status != 'cancelled' &&
           onlyChanges(['payments', 'amountPaid', 'refunds', 'refundedTotal', 'paymentStatus', 'updatedAt'])
         ) ||
-        // Returns (credit notes)
+        // Returns (credit notes) on any non-cancelled invoice
         (
-          (canCreateSalesReturn() || canEditSalesReturn() || canDeleteSalesReturn()) && resource.data.status in ['dispatched', 'delivered'] &&
+          (canCreateSalesReturn() || canEditSalesReturn() || canDeleteSalesReturn()) &&
+          resource.data.status != 'cancelled' &&
           onlyChanges(['returnedQty', 'returnsTotal', 'returnStatus', 'paymentStatus', 'updatedAt'])
         )
       );
@@ -398,6 +414,26 @@ service cloud.firestore {
         request.resource.data.createdBy == request.auth.uid;
       allow update: if isValidId(returnId) && canEditPurchaseReturn();
       allow delete: if isValidId(returnId) && canDeletePurchaseReturn();
+    }
+
+    // 14. Battery checks (warranty / service intake and resolution)
+    match /battery_checks/{checkId} {
+      allow get: if (isProfileActive() || isAdmin()) && isValidId(checkId);
+      allow list: if isProfileActive() || isAdmin();
+      allow create: if canCreateSalesReturn() && isValidId(checkId) &&
+        request.resource.data.createdBy == request.auth.uid;
+      allow update: if canCreateSalesReturn() && isValidId(checkId);
+      allow delete: if canDeleteSalesReturn() && isValidId(checkId);
+    }
+
+    // 15. Customer advances (overpayments / advance receipts kept on party khata)
+    match /customer_advances/{advanceId} {
+      allow get: if (isProfileActive() || isAdmin()) && isValidId(advanceId);
+      allow list: if isProfileActive() || isAdmin();
+      allow create: if canRecordPayments() && isValidId(advanceId) &&
+        request.resource.data.createdBy == request.auth.uid;
+      allow update: if (canRecordPayments() || canEditPayments() || canDeletePayments() || canCreateSales() || canEditSales()) && isValidId(advanceId);
+      allow delete: if canDeletePayments() && isValidId(advanceId);
     }
   }
 }

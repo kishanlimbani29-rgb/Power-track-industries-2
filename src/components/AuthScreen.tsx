@@ -366,9 +366,11 @@ export const AuthScreen: React.FC = () => {
             />
           </div>
           <div>
-            <h1 className="text-2xl font-black tracking-tight text-white">Power Track</h1>
+            <h1 className="text-xl sm:text-2xl font-black tracking-tight text-white">
+              Power Track – Battery Inventory &amp; Production
+            </h1>
             <p className="text-xs text-slate-400 mt-1">
-              Industrial Manufacturing, Inventory & Lead Battery BOM
+              Power Track Industries · Welten Battery Manufacturing
             </p>
           </div>
         </div>

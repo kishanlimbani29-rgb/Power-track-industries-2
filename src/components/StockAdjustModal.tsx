@@ -5,6 +5,7 @@ import { useInventory } from '../context/InventoryContext';
 import { useAuth } from '../context/AuthContext';
 import { formatFirestoreError } from '../firebase/config';
 import { getItemQuantity } from '../utils/itemResolver';
+import { formatQty } from '../utils/numberFormat';
 
 interface StockAdjustModalProps {
   isOpen: boolean;
@@ -13,7 +14,7 @@ interface StockAdjustModalProps {
 }
 
 export const StockAdjustModal: React.FC<StockAdjustModalProps> = ({ isOpen, onClose, item }) => {
-  const { items, quickAdjustStock } = useInventory();
+  const { items, quickAdjustStock, showActionToast } = useInventory();
   const { permissions } = useAuth();
 
   const [selectedItemId, setSelectedItemId] = useState<string>('');
@@ -89,8 +90,17 @@ export const StockAdjustModal: React.FC<StockAdjustModalProps> = ({ isOpen, onCl
     previewNewQty = numericDelta;
   }
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      setError('No internet connection — nothing was saved. Please try again.');
+      return;
+    }
+    if (!permissions.canAdjustStock) {
+      setError('Your user role is not authorized to adjust stock levels.');
+      return;
+    }
+
     const parsedDelta = delta === '' ? 0 : Number(delta);
     if (isNaN(parsedDelta) || (parsedDelta <= 0 && type !== 'adjustment')) {
       setError('Please provide a valid adjustment amount greater than zero.');
@@ -103,28 +113,34 @@ export const StockAdjustModal: React.FC<StockAdjustModalProps> = ({ isOpen, onCl
       return;
     }
 
-    setIsSubmitting(true);
-    setError(null);
-
     const defaultReasons: Record<StockMovementType, string> = {
       in: 'Supplier restock / purchase intake',
-      out: 'Direct retail sale / counter usage',
-      waste: 'Spoilage, damaged raw material or expired item',
+      out: 'Direct customer dispatch / usage',
+      waste: 'Scrap, damaged or rejected material',
       adjustment: 'Periodic physical inventory count adjustment',
       production_consume: 'Manual consumption',
       production_yield: 'Manual production yield',
     };
 
     const finalReason = reason.trim() || defaultReasons[type] || 'Stock adjustment';
+    const itemName = activeItem.name;
 
-    try {
-      await quickAdjustStock(activeItem.id, Number(parsedDelta), type, finalReason);
-      onClose();
-    } catch (err: any) {
-      setError(formatFirestoreError(err, 'Failed to adjust stock.'));
-    } finally {
-      setIsSubmitting(false);
-    }
+    setError(null);
+    showActionToast('Saving…', itemName, 'saving');
+    const savePromise = quickAdjustStock(activeItem.id, Number(parsedDelta), type, finalReason);
+    onClose();
+
+    savePromise
+      .then(() => {
+        showActionToast('Stock updated', itemName, 'success');
+      })
+      .catch((err: any) => {
+        showActionToast(
+          'Could not save stock adjustment',
+          formatFirestoreError(err, 'Failed to adjust stock.'),
+          'error'
+        );
+      });
   };
 
   return (
@@ -176,7 +192,7 @@ export const StockAdjustModal: React.FC<StockAdjustModalProps> = ({ isOpen, onCl
                 <div className="text-right">
                   <span className="text-xs text-slate-500">Current Stock</span>
                   <div className="text-sm font-bold text-slate-900">
-                    {currentQty} {activeItem.unit}
+                    {formatQty(currentQty, activeItem.unit)} {activeItem.unit}
                   </div>
                 </div>
               </div>
@@ -184,11 +200,11 @@ export const StockAdjustModal: React.FC<StockAdjustModalProps> = ({ isOpen, onCl
               <select
                 value={selectedItemId || activeItem.id}
                 onChange={(e) => setSelectedItemId(e.target.value)}
-                className="w-full px-3 py-2 text-sm rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className="w-full h-[38px] px-3 text-sm rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
               >
                 {items.map((it) => (
                   <option key={it.id} value={it.id}>
-                    {it.name} ({it.quantity} {it.unit})
+                    {it.name} ({formatQty(it.quantity, it.unit)} {it.unit})
                   </option>
                 ))}
               </select>
@@ -227,7 +243,7 @@ export const StockAdjustModal: React.FC<StockAdjustModalProps> = ({ isOpen, onCl
                 }`}
               >
                 <Trash2 className="w-4 h-4 mb-0.5" />
-                <span>Waste</span>
+                <span>Scrap</span>
               </button>
               <button
                 type="button"
@@ -267,7 +283,7 @@ export const StockAdjustModal: React.FC<StockAdjustModalProps> = ({ isOpen, onCl
               {isExceedingStock && (
                 <p className="mt-1 text-xs text-rose-600 font-bold flex items-center gap-1 animate-in fade-in">
                   <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                  <span>Only {currentQty} {activeItem.unit} in stock</span>
+                  <span>Only {formatQty(currentQty, activeItem.unit)} {activeItem.unit} in stock</span>
                 </p>
               )}
             </div>
@@ -281,7 +297,7 @@ export const StockAdjustModal: React.FC<StockAdjustModalProps> = ({ isOpen, onCl
                     : 'bg-slate-50 border-slate-200 text-slate-800'
                 }`}
               >
-                <span>{previewNewQty.toFixed(2)}</span>
+                <span>{formatQty(previewNewQty, activeItem.unit)}</span>
                 <span className="text-xs font-normal text-slate-500">{activeItem.unit}</span>
               </div>
             </div>
@@ -296,11 +312,11 @@ export const StockAdjustModal: React.FC<StockAdjustModalProps> = ({ isOpen, onCl
               onChange={(e) => setReason(e.target.value)}
               placeholder={
                 type === 'in'
-                  ? 'e.g. Weekly restock from supplier'
+                  ? 'e.g. Supplier restock delivery'
                   : type === 'out'
-                  ? 'e.g. Counter sales, event catering'
+                  ? 'e.g. Direct customer dispatch, workshop usage'
                   : type === 'waste'
-                  ? 'e.g. Dropped bag, expired shelf life'
+                  ? 'e.g. Scrap, damaged plates, rejected casing'
                   : 'e.g. Month-end physical audit'
               }
               className="w-full px-3 py-2 text-sm rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500"

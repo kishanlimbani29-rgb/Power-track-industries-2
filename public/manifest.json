@@ -1,8 +1,8 @@
 {
   "id": "/",
-  "name": "Power Track - Real-Time Inventory & Recipe Management",
+  "name": "Power Track – Battery Inventory & Production",
   "short_name": "Power Track",
-  "description": "Multi-device real-time stock and inventory management with role-based access control, recipe-based raw material consumption, and comprehensive business analytics.",
+  "description": "Multi-device real-time battery stock, BOM material consumption, and production batch management for Power Track Industries (brand Welten).",
   "theme_color": "#0f172a",
   "background_color": "#0f172a",
   "display": "standalone",

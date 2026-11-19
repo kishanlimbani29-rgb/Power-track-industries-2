@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Shield,
   Check,
@@ -43,6 +43,7 @@ import {
   Undo2,
   Truck,
   Pencil,
+  MoreVertical,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import {
@@ -50,11 +51,16 @@ import {
   RolePermissions,
   RoleDefinition,
   ROLE_PERMISSIONS,
+  BOOLEAN_PERMISSION_KEYS,
+  BooleanPermissionKey,
+  ChangeWindow,
   tradePermissions,
+  resolveRolePermissions,
 } from '../types/inventory';
+import { CHANGE_WINDOW_OPTIONS } from '../utils/changeWindow';
 
 interface CapabilityConfig {
-  key: keyof RolePermissions;
+  key: BooleanPermissionKey;
   title: string;
   category: 'inventory' | 'recipes' | 'production' | 'finances' | 'admin' | 'audit' | 'movements' | 'sales' | 'purchase';
   categoryLabel: string;
@@ -120,24 +126,24 @@ const CAPABILITY_LIST: CapabilityConfig[] = [
     deniedDesc: 'Excel export buttons are hidden across the entire system. User cannot export or download spreadsheet files.',
   },
 
-  // 2. Recipes & BOM
+  // 2. Product BOM
   {
     key: 'canEditRecipes',
-    title: 'Build & Modify Recipes / BOM',
+    title: 'Create & edit BOMs',
     category: 'recipes',
-    categoryLabel: 'Recipes & Bill of Materials',
+    categoryLabel: 'Product BOM',
     icon: BookOpen,
-    allowedDesc: 'User can view the Recipes & BOM menu in the shelf, build bill of materials (BOM), define ingredient consumption formulas, and adjust batch yields.',
-    deniedDesc: 'The Recipes & BOM menu is hidden from the side shelf and access is restricted for this role.',
+    allowedDesc: 'User can view the Product BOM menu in the shelf, create & edit BOMs, define material consumption quantities, and adjust batch yields.',
+    deniedDesc: 'The Product BOM menu is hidden from the side shelf and access is restricted for this role.',
   },
   {
     key: 'canDeleteRecipes',
-    title: 'Delete Recipes',
+    title: 'Delete BOMs',
     category: 'recipes',
-    categoryLabel: 'Recipes & Bill of Materials',
+    categoryLabel: 'Product BOM',
     icon: Trash2,
-    allowedDesc: 'User can permanently delete recipe blueprints and production formulas.',
-    deniedDesc: 'Recipe formulas are protected from accidental or unauthorized deletion.',
+    allowedDesc: 'User can permanently delete BOMs and production formulas.',
+    deniedDesc: 'BOMs are protected from accidental or unauthorized deletion.',
   },
 
   // 3. Manufacturing
@@ -167,8 +173,8 @@ const CAPABILITY_LIST: CapabilityConfig[] = [
     category: 'finances',
     categoryLabel: 'Financial Valuation & Analytics',
     icon: Coins,
-    allowedDesc: 'User can view purchase cost per unit, raw ingredient costs, and procurement prices across product cards and lists.',
-    deniedDesc: 'Unit purchase costs and ingredient costs are masked and hidden (•••) from this role.',
+    allowedDesc: 'User can view purchase cost per unit, raw material costs, and procurement prices across product cards and lists.',
+    deniedDesc: 'Unit purchase costs and material costs are masked and hidden (•••) from this role.',
   },
   {
     key: 'canViewTotalAssetValue',
@@ -272,6 +278,24 @@ const CAPABILITY_LIST: CapabilityConfig[] = [
     icon: Wallet,
     allowedDesc: 'User can record payments received from customers and refunds paid back.',
     deniedDesc: 'Payment buttons are hidden on sales.',
+  },
+  {
+    key: 'canEditPayments',
+    title: 'Edit Payments',
+    category: 'sales',
+    categoryLabel: 'Sales & Customer Invoices',
+    icon: Pencil,
+    allowedDesc: 'User can edit customer payment and advance entries (amount, mode, date, note).',
+    deniedDesc: 'Editing customer payment or advance entries is restricted for this role.',
+  },
+  {
+    key: 'canDeletePayments',
+    title: 'Remove Payments',
+    category: 'sales',
+    categoryLabel: 'Sales & Customer Invoices',
+    icon: Trash2,
+    allowedDesc: 'User can remove customer payment and advance entries and recalculate party balances.',
+    deniedDesc: 'Removing customer payment or advance entries is restricted for this role.',
   },
   {
     key: 'canCreateSalesReturn',
@@ -404,7 +428,438 @@ const CAPABILITY_LIST: CapabilityConfig[] = [
   },
 ];
 
-export const TeamView: React.FC = () => {
+export type AccessLevel = 'Hidden' | 'View' | 'Work' | 'Full';
+
+export interface SectionDefinition {
+  id: string;
+  name: string;
+  icon: string;
+  allKeys: (keyof RolePermissions)[];
+  viewKeys: (keyof RolePermissions)[];
+  workKeys?: (keyof RolePermissions)[]; // undefined for Team which only has Hidden | View | Full
+  fullKeys: (keyof RolePermissions)[];
+  descriptions: {
+    hidden: string;
+    view: string;
+    work?: string;
+    full: string;
+  };
+}
+
+export const SECTIONS: SectionDefinition[] = [
+  {
+    id: 'inventory',
+    name: 'Inventory',
+    icon: '📦',
+    viewKeys: ['canOpenProductDetail', 'canViewStockMovementsOption'],
+    workKeys: ['canOpenProductDetail', 'canViewStockMovementsOption', 'canAdjustStock', 'canExportExcel'],
+    fullKeys: ['canOpenProductDetail', 'canViewStockMovementsOption', 'canAdjustStock', 'canExportExcel', 'canEditItems', 'canDeleteItems'],
+    allKeys: ['canOpenProductDetail', 'canViewStockMovementsOption', 'canAdjustStock', 'canExportExcel', 'canEditItems', 'canDeleteItems'],
+    descriptions: {
+      hidden: "Can't see inventory or stock movements",
+      view: 'Open items and view stock movement ledger',
+      work: 'Open items, stock in/out, export',
+      full: 'Create, edit, delete items, stock in/out, export',
+    },
+  },
+  {
+    id: 'production',
+    name: 'Production (BOMs & batches)',
+    icon: '🧪',
+    viewKeys: ['canViewBatchProductionOption'],
+    workKeys: ['canViewBatchProductionOption', 'canProduceBatch'],
+    fullKeys: ['canViewBatchProductionOption', 'canProduceBatch', 'canEditRecipes', 'canDeleteRecipes'],
+    allKeys: ['canViewBatchProductionOption', 'canProduceBatch', 'canEditRecipes', 'canDeleteRecipes'],
+    descriptions: {
+      hidden: "Can't see production or BOMs",
+      view: 'Look only: view batch production screen',
+      work: 'View batches and execute production runs (no BOM edits)',
+      full: 'Create & edit BOMs, delete BOMs, produce batches',
+    },
+  },
+  {
+    id: 'audit',
+    name: 'Audit',
+    icon: '📋',
+    viewKeys: ['canViewAuditReports'],
+    workKeys: ['canViewAuditReports', 'canSubmitAuditRequests'],
+    fullKeys: ['canViewAuditReports', 'canSubmitAuditRequests', 'canAuditRequests'],
+    allKeys: ['canViewAuditReports', 'canSubmitAuditRequests', 'canAuditRequests'],
+    descriptions: {
+      hidden: "Can't see audit reports",
+      view: 'Look only: view audit reports',
+      work: 'View audit and submit production/dispatch requests',
+      full: 'Audit, verify, approve, and reject requests',
+    },
+  },
+  {
+    id: 'sales',
+    name: 'Sales',
+    icon: '🧾',
+    viewKeys: ['canViewSalesOption'],
+    workKeys: ['canViewSalesOption', 'canCreateSales', 'canRecordPayments', 'canCreateSalesReturn'],
+    fullKeys: ['canViewSalesOption', 'canCreateSales', 'canRecordPayments', 'canEditPayments', 'canDeletePayments', 'canCreateSalesReturn', 'canEditSales', 'canDeleteSales', 'canEditSalesReturn', 'canDeleteSalesReturn'],
+    allKeys: ['canViewSalesOption', 'canCreateSales', 'canRecordPayments', 'canEditPayments', 'canDeletePayments', 'canCreateSalesReturn', 'canEditSales', 'canDeleteSales', 'canEditSalesReturn', 'canDeleteSalesReturn'],
+    descriptions: {
+      hidden: "Can't see sales invoices or customer orders",
+      view: 'Look only: view sales invoices and customers',
+      work: 'Create sales, record payments, sales returns',
+      full: 'Edit, delete invoices, edit/remove payments & credit notes',
+    },
+  },
+  {
+    id: 'purchase',
+    name: 'Purchase',
+    icon: '🚚',
+    viewKeys: ['canViewPurchaseOption'],
+    workKeys: ['canViewPurchaseOption', 'canCreatePurchase', 'canReceivePurchase', 'canRecordPurchasePayments', 'canCreatePurchaseReturn'],
+    fullKeys: ['canViewPurchaseOption', 'canCreatePurchase', 'canReceivePurchase', 'canRecordPurchasePayments', 'canCreatePurchaseReturn', 'canEditPurchase', 'canDeletePurchase', 'canEditPurchaseReturn', 'canDeletePurchaseReturn'],
+    allKeys: ['canViewPurchaseOption', 'canCreatePurchase', 'canReceivePurchase', 'canRecordPurchasePayments', 'canCreatePurchaseReturn', 'canEditPurchase', 'canDeletePurchase', 'canEditPurchaseReturn', 'canDeletePurchaseReturn'],
+    descriptions: {
+      hidden: "Can't see purchase orders or suppliers",
+      view: 'Look only: view purchase orders',
+      work: 'Create orders, receive goods, record payments & returns',
+      full: 'Edit, delete purchase orders and debit notes',
+    },
+  },
+  {
+    id: 'finances',
+    name: 'Money & Reports',
+    icon: '💰',
+    viewKeys: ['canViewShelfOption'],
+    workKeys: ['canViewShelfOption', 'canViewCostPerUnit', 'canViewTotalAssetValue'],
+    fullKeys: ['canViewShelfOption', 'canViewCostPerUnit', 'canViewTotalAssetValue', 'canViewFinances'],
+    allKeys: ['canViewShelfOption', 'canViewCostPerUnit', 'canViewTotalAssetValue', 'canViewFinances'],
+    descriptions: {
+      hidden: "Can't see finances, costs, or valuations",
+      view: 'Look only: view warehouse shelf analytics',
+      work: 'View unit purchase costs and total asset valuation',
+      full: 'Margins, profit reports, and all financial metrics',
+    },
+  },
+  {
+    id: 'team',
+    name: 'Team',
+    icon: '👥',
+    viewKeys: ['canViewRolesAccessOption'],
+    fullKeys: ['canViewRolesAccessOption', 'canManageUsers'],
+    allKeys: ['canViewRolesAccessOption', 'canManageUsers'],
+    descriptions: {
+      hidden: "Can't see team or roles menu",
+      view: 'Look only: view roles & team access control',
+      full: 'Manage team roles, statuses, and permissions',
+    },
+  },
+];
+
+export const PERMISSION_META: Record<keyof RolePermissions, { shortName: string; tag: string; desc: string }> = {
+  canOpenProductDetail: {
+    shortName: 'Open product details',
+    tag: 'open items',
+    desc: 'Tap on product cards to open statement, ledger, and detail view.',
+  },
+  canViewStockMovementsOption: {
+    shortName: 'View stock movements',
+    tag: 'view ledger',
+    desc: 'Open Stock Movements menu in the side shelf navigation.',
+  },
+  canAdjustStock: {
+    shortName: 'Stock in / out / audits',
+    tag: 'stock in/out',
+    desc: 'Perform manual stock adjustments, receipts, waste, and audits.',
+  },
+  canExportExcel: {
+    shortName: 'Export Excel spreadsheets',
+    tag: 'export',
+    desc: 'Download inventory, batches, movements, and reports to .xlsx.',
+  },
+  canEditItems: {
+    shortName: 'Create & edit items',
+    tag: 'edit items',
+    desc: 'Add new items, update specifications, suppliers, and costs.',
+  },
+  canDeleteItems: {
+    shortName: 'Delete inventory items',
+    tag: 'delete items',
+    desc: 'Permanently remove raw materials or products from catalog.',
+  },
+  canViewBatchProductionOption: {
+    shortName: 'View batch production',
+    tag: 'view batches',
+    desc: 'Open Batch Production menu in the side shelf navigation.',
+  },
+  canProduceBatch: {
+    shortName: 'Execute batch production',
+    tag: 'produce batches',
+    desc: 'Execute production runs and automatically deduct raw materials.',
+  },
+  canEditRecipes: {
+    shortName: 'Create & edit BOMs',
+    tag: 'edit BOMs',
+    desc: 'Create & edit Bill of Materials (BOM), material quantities, and yields.',
+  },
+  canDeleteRecipes: {
+    shortName: 'Delete BOMs',
+    tag: 'delete BOMs',
+    desc: 'Permanently remove BOMs and production formulas.',
+  },
+  canViewAuditReports: {
+    shortName: 'View audit reports',
+    tag: 'view audit',
+    desc: 'Open Audit Reports menu in the side shelf navigation.',
+  },
+  canSubmitAuditRequests: {
+    shortName: 'Submit audit requests',
+    tag: 'submit requests',
+    desc: 'Submit production, dispatch, and raw receipt requests to queue.',
+  },
+  canAuditRequests: {
+    shortName: 'Audit & approve requests',
+    tag: 'audit & approve',
+    desc: 'Authorized auditor: review, verify, approve, or reject requests.',
+  },
+  canViewSalesOption: {
+    shortName: 'View sales invoices',
+    tag: 'view sales',
+    desc: 'Open Sales menu in the side shelf navigation drawer.',
+  },
+  canCreateSales: {
+    shortName: 'Create & dispatch sales',
+    tag: 'create sales',
+    desc: 'Create sales orders, deduct stock, update dispatch status.',
+  },
+  canRecordPayments: {
+    shortName: 'Record customer payments',
+    tag: 'record payments',
+    desc: 'Record payments received from customers and advances.',
+  },
+  canEditPayments: {
+    shortName: 'Edit payments',
+    tag: 'edit payments',
+    desc: 'Edit payment or advance amount, mode, date, and notes.',
+  },
+  canDeletePayments: {
+    shortName: 'Remove payments',
+    tag: 'remove payments',
+    desc: 'Remove payment or advance entries and recalculate party due.',
+  },
+  canCreateSalesReturn: {
+    shortName: 'Sales returns (credit notes)',
+    tag: 'sales returns',
+    desc: 'Record customer returns; good condition items return to stock.',
+  },
+  canEditSales: {
+    shortName: 'Edit sale invoices',
+    tag: 'edit sales',
+    desc: 'Edit customer info, line items, quantities, rates, and notes.',
+  },
+  canDeleteSales: {
+    shortName: 'Delete sale invoices',
+    tag: 'delete sales',
+    desc: 'Permanently delete sale invoices and restore deducted stock.',
+  },
+  canEditSalesReturn: {
+    shortName: 'Edit sales returns',
+    tag: 'edit returns',
+    desc: 'Edit returned quantities, reason, and condition on returns.',
+  },
+  canDeleteSalesReturn: {
+    shortName: 'Delete sales returns',
+    tag: 'delete returns',
+    desc: 'Permanently delete sales returns and safely reverse restock.',
+  },
+  canViewPurchaseOption: {
+    shortName: 'View purchase orders',
+    tag: 'view purchase',
+    desc: 'Open Purchase menu in the side shelf navigation drawer.',
+  },
+  canCreatePurchase: {
+    shortName: 'Create purchase orders',
+    tag: 'create orders',
+    desc: 'Create purchase orders for suppliers and cancel unreceived orders.',
+  },
+  canReceivePurchase: {
+    shortName: 'Receive goods into stock',
+    tag: 'receive goods',
+    desc: 'Receive delivered goods against orders and update average cost.',
+  },
+  canRecordPurchasePayments: {
+    shortName: 'Record supplier payments',
+    tag: 'supplier payments',
+    desc: 'Record payments made to suppliers and refunds received.',
+  },
+  canCreatePurchaseReturn: {
+    shortName: 'Purchase returns (debit notes)',
+    tag: 'purchase returns',
+    desc: 'Return received goods to suppliers and deduct stock.',
+  },
+  canEditPurchase: {
+    shortName: 'Edit purchase orders',
+    tag: 'edit orders',
+    desc: 'Edit supplier info, items, quantities, rates, and expected dates.',
+  },
+  canDeletePurchase: {
+    shortName: 'Delete purchase orders',
+    tag: 'delete orders',
+    desc: 'Permanently delete purchase orders and reverse received stock.',
+  },
+  canEditPurchaseReturn: {
+    shortName: 'Edit purchase returns',
+    tag: 'edit debit notes',
+    desc: 'Edit returned quantities, vehicle number, and notes on debit notes.',
+  },
+  canDeletePurchaseReturn: {
+    shortName: 'Delete purchase returns',
+    tag: 'delete debit notes',
+    desc: 'Permanently delete purchase returns and restore deducted stock.',
+  },
+  canViewShelfOption: {
+    shortName: 'View shelf analytics',
+    tag: 'shelf reports',
+    desc: 'Open Analytics & Reports to analyze warehouse shelf allocation.',
+  },
+  canViewCostPerUnit: {
+    shortName: 'View unit cost',
+    tag: 'unit cost',
+    desc: 'View purchase cost per unit and raw material prices.',
+  },
+  canViewTotalAssetValue: {
+    shortName: 'View asset valuation',
+    tag: 'valuation',
+    desc: 'View total inventory valuation and warehouse asset totals.',
+  },
+  canViewFinances: {
+    shortName: 'Margins & profit reports',
+    tag: 'margins',
+    desc: 'View estimated batch margins, gross profit, and financial reports.',
+  },
+  canViewRolesAccessOption: {
+    shortName: 'View roles & team menu',
+    tag: 'view roles',
+    desc: 'Open Roles & Access Control menu in the side shelf.',
+  },
+  canManageUsers: {
+    shortName: 'Manage team & roles',
+    tag: 'manage team',
+    desc: 'Full authority to configure access switches and manage team roles.',
+  },
+  changeWindow: {
+    shortName: 'Time limit for changes',
+    tag: 'time limit',
+    desc: 'How long after creation entries can be edited, voided, or removed.',
+  },
+  canChangeOthersEntries: {
+    shortName: "Can change other people's entries",
+    tag: "others' entries",
+    desc: 'Allow editing, voiding, or removing entries created by other team members.',
+  },
+};
+
+export type SectionEvalLevel = AccessLevel | 'Custom';
+
+export function evaluateSectionLevel(
+  section: SectionDefinition,
+  permissions: RolePermissions
+): {
+  level: SectionEvalLevel;
+  isCustomMix: boolean;
+  displayLevel: string;
+  summary: string;
+} {
+  const activeKeys = section.allKeys.filter((k) => Boolean(permissions[k]));
+
+  // 1. Hidden = no key of the section is on
+  if (activeKeys.length === 0) {
+    return {
+      level: 'Hidden',
+      isCustomMix: false,
+      displayLevel: 'Hidden',
+      summary: section.descriptions.hidden,
+    };
+  }
+
+  const hasAll = (keys: (keyof RolePermissions)[]) =>
+    keys.length > 0 && keys.every((k) => Boolean(permissions[k]));
+
+  const exactMatch = (keys: (keyof RolePermissions)[]) =>
+    activeKeys.length === keys.length && hasAll(keys);
+
+  // 2. Exact Full / Work / View matches
+  if (exactMatch(section.fullKeys)) {
+    return {
+      level: 'Full',
+      isCustomMix: false,
+      displayLevel: 'Full',
+      summary: section.descriptions.full,
+    };
+  }
+
+  if (section.workKeys && exactMatch(section.workKeys)) {
+    return {
+      level: 'Work',
+      isCustomMix: false,
+      displayLevel: 'Work',
+      summary: section.descriptions.work || '',
+    };
+  }
+
+  if (exactMatch(section.viewKeys)) {
+    return {
+      level: 'View',
+      isCustomMix: false,
+      displayLevel: 'View',
+      summary: section.descriptions.view,
+    };
+  }
+
+  // 3. Some keys are on, doesn't match a level exactly -> highest fully-included level + "✱"
+  if (section.workKeys && hasAll(section.workKeys)) {
+    const extraKeys = activeKeys.filter((k) => !section.workKeys!.includes(k));
+    const extraTags = extraKeys.map((k) => PERMISSION_META[k]?.tag || k).join(', ');
+    return {
+      level: 'Work',
+      isCustomMix: true,
+      displayLevel: 'Work ✱',
+      summary: `Work + ${extraTags} ✱`,
+    };
+  }
+
+  if (hasAll(section.viewKeys)) {
+    const extraKeys = activeKeys.filter((k) => !section.viewKeys.includes(k));
+    const extraTags = extraKeys.map((k) => PERMISSION_META[k]?.tag || k).join(', ');
+    return {
+      level: 'View',
+      isCustomMix: true,
+      displayLevel: 'View ✱',
+      summary: `View + ${extraTags} ✱`,
+    };
+  }
+
+  // 4. No level is fully included, but some keys are on -> "Custom ✱" (never "Hidden")
+  const activeTags = activeKeys.map((k) => PERMISSION_META[k]?.tag || k).join(', ');
+  return {
+    level: 'Custom',
+    isCustomMix: true,
+    displayLevel: 'Custom ✱',
+    summary: `Custom: ${activeTags} ✱`,
+  };
+}
+
+export interface TeamViewProps {
+  returnToAllRolesKey?: number;
+}
+
+const SECTION_SHORT_LABELS: Record<string, string> = {
+  inventory: 'Inventory',
+  production: 'Production',
+  audit: 'Audit',
+  sales: 'Sales',
+  purchase: 'Purchase',
+  finances: 'Money',
+  team: 'Team',
+};
+
+export const TeamView: React.FC<TeamViewProps> = ({ returnToAllRolesKey = 0 }) => {
   const {
     currentUser,
     role,
@@ -417,6 +872,7 @@ export const TeamView: React.FC = () => {
     resetRolePermissions,
     allRoles,
     addCustomRole,
+    renameCustomRole,
     deleteCustomRole,
     teamMembers,
     pendingUsers,
@@ -431,11 +887,52 @@ export const TeamView: React.FC = () => {
     deleteInvite,
   } = useAuth();
 
-  // Navigation tab state: 'roles' (Role Rights & Access Control) | 'team' (Team Members & Approvals)
   const [activeTab, setActiveTab] = useState<'roles' | 'team'>('roles');
 
-  // Page navigation state: null = Roles List, string = Role detail access control page
-  const [selectedRoleId, setSelectedRoleId] = useState<string | null>(null);
+  // Two-screen state: null = Screen 1 (All Roles), string = Screen 2 (Role Detail)
+  const [editingRoleId, setEditingRoleId] = useState<string | null>(null);
+
+  // Local draft of permissions per role (in-memory changes before Save)
+  const [draftRolePermissions, setDraftRolePermissions] = useState<Record<string, RolePermissions>>({});
+
+  // Fine-tune bottom sheet state (which section is being fine-tuned)
+  const [fineTuneSection, setFineTuneSection] = useState<SectionDefinition | null>(null);
+
+  // Top ⋮ menu & secondary modals for Role Detail / Test Role
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [isCopyFromModalOpen, setIsCopyFromModalOpen] = useState(false);
+  const [isRenameModalOpen, setIsRenameModalOpen] = useState(false);
+  const [renameTitleInput, setRenameTitleInput] = useState('');
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [isRenaming, setIsRenaming] = useState(false);
+  const [testUnsavedRoleId, setTestUnsavedRoleId] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const roleDetailHistoryPushedRef = useRef(false);
+  const ignoreNextPopStateRef = useRef(false);
+
+  useEffect(() => {
+    if (returnToAllRolesKey > 0) {
+      setActiveTab('roles');
+      setEditingRoleId(null);
+      setIsMenuOpen(false);
+      setFineTuneSection(null);
+    }
+  }, [returnToAllRolesKey]);
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setIsMenuOpen(false);
+      }
+    };
+    if (isMenuOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [isMenuOpen]);
 
   // Invite by email form state
   const [inviteEmail, setInviteEmail] = useState('');
@@ -473,6 +970,8 @@ export const TeamView: React.FC = () => {
     canAuditRequests: false,
     canManageUsers: false,
     ...tradePermissions(false),
+    changeWindow: '2h',
+    canChangeOthersEntries: false,
   });
   const [roleModalError, setRoleModalError] = useState<string | null>(null);
   const [isCreatingRole, setIsCreatingRole] = useState(false);
@@ -487,6 +986,7 @@ export const TeamView: React.FC = () => {
   } | null>(null);
 
   const isRealAdmin = actualRole === 'admin';
+  const canManageTeam = Boolean(permissions.canManageUsers);
   const isAdmin = permissions.canManageUsers && isRealAdmin;
 
   const showNotification = (msg: string) => {
@@ -667,51 +1167,15 @@ export const TeamView: React.FC = () => {
     }
   };
 
-  // Helper to get effective permissions for a role
+  // Helper to get saved effective permissions for a role (settings/roles_permissions with ROLE_PERMISSIONS defaults)
   const getRoleEffectivePermissions = (roleId: string): RolePermissions => {
-    const defaultPerms = ROLE_PERMISSIONS[roleId as keyof typeof ROLE_PERMISSIONS] || {
-      canEditItems: false,
-      canDeleteItems: false,
-      canOpenProductDetail: false,
-      canEditRecipes: false,
-      canDeleteRecipes: false,
-      canProduceBatch: false,
-      canAdjustStock: false,
-      canViewCostPerUnit: false,
-      canViewTotalAssetValue: false,
-      canViewFinances: false,
-      canViewShelfOption: false,
-      canViewBatchProductionOption: false,
-      canViewAuditReports: false,
-      canViewStockMovementsOption: false,
-      canViewRolesAccessOption: false,
-      canExportExcel: false,
-      canSubmitAuditRequests: false,
-      canAuditRequests: false,
-      canManageUsers: false,
-      ...tradePermissions(false),
-    };
-
-    if (rolePermissions && rolePermissions[roleId as UserRole]) {
-      return {
-        ...defaultPerms,
-        ...rolePermissions[roleId as UserRole],
-      };
-    }
-    const roleDef = allRoles.find((r) => r.id === roleId);
-    if (roleDef) {
-      return {
-        ...defaultPerms,
-        ...roleDef.permissions,
-      };
-    }
-    return defaultPerms;
+    return resolveRolePermissions(roleId, rolePermissions, allRoles);
   };
 
   // Count how many capabilities are enabled for a role
   const getEnabledCount = (roleId: string) => {
     const perms = getRoleEffectivePermissions(roleId);
-    return Object.values(perms).filter(Boolean).length;
+    return BOOLEAN_PERMISSION_KEYS.filter((k) => Boolean(perms[k])).length;
   };
 
   // Toggle single permission for target role
@@ -744,7 +1208,7 @@ export const TeamView: React.FC = () => {
     }
   };
 
-  // Grant All Capabilities for target role (Single write for all 14 switches)
+  // Grant All Capabilities for target role (Single write for all switches)
   const handleGrantAll = async (targetRole: UserRole) => {
     if (!isAdmin) {
       showNotification('Administrator privileges required.');
@@ -753,26 +1217,7 @@ export const TeamView: React.FC = () => {
 
     try {
       const grantAllPerms: RolePermissions = {
-        canEditItems: true,
-        canDeleteItems: true,
-        canOpenProductDetail: true,
-        canAdjustStock: true,
-        canEditRecipes: true,
-        canDeleteRecipes: true,
-        canProduceBatch: true,
-        canViewCostPerUnit: true,
-        canViewTotalAssetValue: true,
-        canViewFinances: true,
-        canViewShelfOption: true,
-        canViewBatchProductionOption: true,
-        canViewAuditReports: true,
-        canViewStockMovementsOption: true,
-        canViewRolesAccessOption: true,
-        canExportExcel: true,
-        canSubmitAuditRequests: true,
-        canAuditRequests: true,
-        canManageUsers: true,
-        ...tradePermissions(true),
+        ...ROLE_PERMISSIONS.admin,
       };
       await setRoleFullPermissions(targetRole, grantAllPerms);
       showNotification(`All ${CAPABILITY_LIST.length} capabilities enabled for role: ${targetRole.toUpperCase()}.`);
@@ -810,6 +1255,8 @@ export const TeamView: React.FC = () => {
         canAuditRequests: false,
         canManageUsers: targetRole === 'admin', // keep manage users on admin to prevent lockout
         ...tradePermissions(false),
+        changeWindow: targetRole === 'admin' ? 'none' : '15m',
+        canChangeOthersEntries: targetRole === 'admin',
       };
       await setRoleFullPermissions(targetRole, revokeAllPerms);
       showNotification(
@@ -886,9 +1333,14 @@ export const TeamView: React.FC = () => {
       onConfirm: async () => {
         try {
           await deleteCustomRole(roleDef.id);
+          setDraftRolePermissions((prev) => {
+            const next = { ...prev };
+            delete next[roleDef.id];
+            return next;
+          });
           showNotification(`Role "${roleDef.title}" has been deleted.`);
-          if (selectedRoleId === roleDef.id) {
-            setSelectedRoleId(null);
+          if (editingRoleId === roleDef.id) {
+            closeRoleDetailCleanly();
           }
         } catch (err: any) {
           showNotification(`Failed to delete role: ${err?.message || err}`);
@@ -921,6 +1373,8 @@ export const TeamView: React.FC = () => {
         canAuditRequests: false,
         canManageUsers: false,
         ...tradePermissions(false),
+        changeWindow: '2h',
+        canChangeOthersEntries: false,
       });
       return;
     }
@@ -978,8 +1432,8 @@ export const TeamView: React.FC = () => {
       setNewRoleTitle('');
       setNewRoleId('');
       setNewRoleDesc('');
-      // Navigate directly to the new role to control its access
-      setSelectedRoleId(cleanId);
+      // Navigate directly to the new role's detail screen to control its access
+      openRoleDetail(cleanId);
     } catch (err: any) {
       setRoleModalError(err?.message || 'Failed to create role');
     } finally {
@@ -987,14 +1441,466 @@ export const TeamView: React.FC = () => {
     }
   };
 
-  const selectedRoleDef = selectedRoleId
-    ? allRoles.find((r) => r.id === selectedRoleId) || null
-    : null;
+  const getRoleDisplayName = (r?: RoleDefinition | null, fallbackId?: string): string => {
+    const id = r?.id || fallbackId || '';
+    if (id === 'admin') return 'Owner';
+    if (id === 'manager') return 'Manager';
+    if (id === 'staff') return 'Staff';
+    if (id === 'viewer') return 'Viewer';
+    return r?.title || id;
+  };
 
-  const selectedRolePerms = selectedRoleId ? getRoleEffectivePermissions(selectedRoleId) : null;
+  const getRoleMemberCount = (roleId: string): number => {
+    if (activeUsers && activeUsers.length > 0) {
+      return activeUsers.filter((m) => m.role === roleId).length;
+    }
+    return actualRole === roleId ? 1 : 0;
+  };
+
+  const formatMemberCount = (count: number): string => {
+    return `${count} ${count === 1 ? 'member' : 'members'}`;
+  };
+
+  const openRoleDetail = (roleId: string) => {
+    setIsMenuOpen(false);
+    setFineTuneSection(null);
+    setEditingRoleId(roleId);
+    if (!roleDetailHistoryPushedRef.current) {
+      window.history.pushState({ roleDetail: true }, '');
+      roleDetailHistoryPushedRef.current = true;
+    }
+  };
+
+  const closeRoleDetailCleanly = () => {
+    setIsMenuOpen(false);
+    setFineTuneSection(null);
+    setEditingRoleId(null);
+    if (roleDetailHistoryPushedRef.current) {
+      roleDetailHistoryPushedRef.current = false;
+      ignoreNextPopStateRef.current = true;
+      window.history.back();
+    }
+  };
+
+  // Effective role helper for Screen 2 (defaults to manager only for fallback type safety when null)
+  const selectedRole = editingRoleId || 'manager';
+  const selectedRoleDef = allRoles.find((r) => r.id === selectedRole) || allRoles[0];
+  const selectedRoleDisplayName = getRoleDisplayName(selectedRoleDef, selectedRole);
+
+  // Working permissions for a given role (Owner is always Full everywhere)
+  const getWorkingPermissions = (roleId: string): RolePermissions => {
+    if (roleId === 'admin') {
+      return { ...ROLE_PERMISSIONS.admin };
+    }
+    return draftRolePermissions[roleId] || getRoleEffectivePermissions(roleId);
+  };
+
+  const getRoleDiffCount = (roleId: string): number => {
+    if (roleId === 'admin') return 0;
+    const draft = draftRolePermissions[roleId];
+    if (!draft) return 0;
+    const saved = getRoleEffectivePermissions(roleId);
+    return (Object.keys(saved) as (keyof RolePermissions)[]).filter(
+      (k) => draft[k] !== saved[k]
+    ).length;
+  };
+
+  const savedPerms = getRoleEffectivePermissions(selectedRole);
+  const workingPerms = getWorkingPermissions(selectedRole);
+
+  const changedKeys =
+    !editingRoleId || selectedRole === 'admin'
+      ? []
+      : (Object.keys(savedPerms) as (keyof RolePermissions)[]).filter(
+          (k) => workingPerms[k] !== savedPerms[k]
+        );
+  const isDirty = changedKeys.length > 0;
+  const diffCount = changedKeys.length;
+
+  const hasAnyCustomMix = SECTIONS.some(
+    (sec) => evaluateSectionLevel(sec, workingPerms).isCustomMix
+  );
+
+  // Back navigation from Screen 2 -> Screen 1 (with Discard changes? prompt if dirty)
+  const handleBackToAllRoles = () => {
+    if (!editingRoleId) return;
+    if (isDirty) {
+      setConfirmDialog({
+        isOpen: true,
+        title: 'Discard changes?',
+        message: `You have ${diffCount} unsaved change${
+          diffCount > 1 ? 's' : ''
+        } for ${selectedRoleDisplayName}. Discard them and return to All roles?`,
+        confirmLabel: 'Discard',
+        isDestructive: true,
+        onConfirm: () => {
+          const targetRole = editingRoleId;
+          setDraftRolePermissions((prev) => {
+            const next = { ...prev };
+            delete next[targetRole];
+            return next;
+          });
+          closeRoleDetailCleanly();
+        },
+      });
+      return;
+    }
+    closeRoleDetailCleanly();
+  };
+
+  // Phone / browser Back button support while Screen 2 is open
+  useEffect(() => {
+    const onPopState = () => {
+      if (ignoreNextPopStateRef.current) {
+        ignoreNextPopStateRef.current = false;
+        return;
+      }
+      if (!editingRoleId) return;
+
+      if (fineTuneSection) {
+        setFineTuneSection(null);
+        window.history.pushState({ roleDetail: true }, '');
+        roleDetailHistoryPushedRef.current = true;
+        return;
+      }
+
+      const currentDiff = getRoleDiffCount(editingRoleId);
+      if (currentDiff > 0) {
+        window.history.pushState({ roleDetail: true }, '');
+        roleDetailHistoryPushedRef.current = true;
+        const roleObj = allRoles.find((r) => r.id === editingRoleId);
+        const rName = getRoleDisplayName(roleObj, editingRoleId);
+        setConfirmDialog({
+          isOpen: true,
+          title: 'Discard changes?',
+          message: `You have ${currentDiff} unsaved change${
+            currentDiff > 1 ? 's' : ''
+          } for ${rName}. Discard them and return to All roles?`,
+          confirmLabel: 'Discard',
+          isDestructive: true,
+          onConfirm: () => {
+            const targetRole = editingRoleId;
+            setDraftRolePermissions((prev) => {
+              const next = { ...prev };
+              delete next[targetRole];
+              return next;
+            });
+            closeRoleDetailCleanly();
+          },
+        });
+      } else {
+        roleDetailHistoryPushedRef.current = false;
+        setIsMenuOpen(false);
+        setFineTuneSection(null);
+        setEditingRoleId(null);
+      }
+    };
+
+    window.addEventListener('popstate', onPopState);
+    return () => {
+      window.removeEventListener('popstate', onPopState);
+    };
+  });
+
+  // Switch top tab with discard prompt if inside a dirty Role Detail screen
+  const handleSelectTab = (newTab: 'roles' | 'team') => {
+    if (newTab === activeTab) {
+      if (newTab === 'roles' && editingRoleId) {
+        handleBackToAllRoles();
+      }
+      return;
+    }
+    if (editingRoleId && isDirty) {
+      setConfirmDialog({
+        isOpen: true,
+        title: 'Discard changes?',
+        message: `You have ${diffCount} unsaved change${
+          diffCount > 1 ? 's' : ''
+        } for ${selectedRoleDisplayName}. Discard them to switch tabs?`,
+        confirmLabel: 'Discard & Switch',
+        isDestructive: true,
+        onConfirm: () => {
+          const targetRole = editingRoleId;
+          setDraftRolePermissions((prev) => {
+            const next = { ...prev };
+            delete next[targetRole];
+            return next;
+          });
+          closeRoleDetailCleanly();
+          setActiveTab(newTab);
+        },
+      });
+      return;
+    }
+    if (editingRoleId) {
+      closeRoleDetailCleanly();
+    }
+    setActiveTab(newTab);
+  };
+
+  // Trigger "Test this role" (from Screen 1 card OR Screen 2 top bar / menu)
+  const handleTriggerTestRole = (targetRoleId: string) => {
+    if (targetRoleId === 'admin') return;
+    if (!canManageTeam) return;
+
+    const unsavedCount = getRoleDiffCount(targetRoleId);
+    if (unsavedCount > 0) {
+      setTestUnsavedRoleId(targetRoleId);
+      return;
+    }
+
+    if (editingRoleId) {
+      closeRoleDetailCleanly();
+    }
+    switchSimulatedRole(targetRoleId as UserRole);
+  };
+
+  const handleSaveAndTestRole = async () => {
+    if (!testUnsavedRoleId) return;
+    const targetRoleId = testUnsavedRoleId;
+    const draft = draftRolePermissions[targetRoleId];
+    if (!draft) {
+      setTestUnsavedRoleId(null);
+      if (editingRoleId) closeRoleDetailCleanly();
+      switchSimulatedRole(targetRoleId as UserRole);
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      await setRoleFullPermissions(targetRoleId as UserRole, draft);
+      setDraftRolePermissions((prev) => {
+        const next = { ...prev };
+        delete next[targetRoleId];
+        return next;
+      });
+      setTestUnsavedRoleId(null);
+      if (editingRoleId) {
+        closeRoleDetailCleanly();
+      }
+      switchSimulatedRole(targetRoleId as UserRole);
+    } catch (err: any) {
+      showNotification(`Failed to save permissions before testing: ${err?.message || err}`);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleTestWithoutSavingRole = () => {
+    if (!testUnsavedRoleId) return;
+    const targetRoleId = testUnsavedRoleId;
+    setTestUnsavedRoleId(null);
+    if (editingRoleId) {
+      closeRoleDetailCleanly();
+    }
+    switchSimulatedRole(targetRoleId as UserRole);
+  };
+
+  // Rename custom role
+  const handleSubmitRename = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingRoleId || selectedRoleDef?.isSystem) return;
+    const trimmed = renameTitleInput.trim();
+    if (!trimmed) {
+      setRenameError('Role name cannot be empty.');
+      return;
+    }
+    setIsRenaming(true);
+    setRenameError(null);
+    try {
+      await renameCustomRole(editingRoleId, trimmed);
+      setIsRenameModalOpen(false);
+      showNotification(`Role renamed to "${trimmed}".`);
+    } catch (err: any) {
+      setRenameError(err?.message || 'Failed to rename role.');
+    } finally {
+      setIsRenaming(false);
+    }
+  };
+
+  // Set standard level for a section (Hidden, View, Work, Full)
+  const handleSetSectionLevel = (section: SectionDefinition, targetLevel: AccessLevel) => {
+    if (selectedRole === 'admin') return; // Owner locked
+    if (!isAdmin) {
+      showNotification('Administrator privileges required to change permissions.');
+      return;
+    }
+
+    const updatedRolePerms: RolePermissions = { ...workingPerms };
+
+    // Reset all keys in this section to false first
+    section.allKeys.forEach((key) => {
+      if (key === 'changeWindow') return;
+      updatedRolePerms[key] = false;
+    });
+
+    if (targetLevel === 'View') {
+      section.viewKeys.forEach((key) => {
+        if (key === 'changeWindow') return;
+        updatedRolePerms[key] = true;
+      });
+    } else if (targetLevel === 'Work' && section.workKeys) {
+      section.workKeys.forEach((key) => {
+        if (key === 'changeWindow') return;
+        updatedRolePerms[key] = true;
+      });
+    } else if (targetLevel === 'Full') {
+      section.fullKeys.forEach((key) => {
+        if (key === 'changeWindow') return;
+        updatedRolePerms[key] = true;
+      });
+    }
+    // Hidden leaves all false
+
+    setDraftRolePermissions((prev) => ({
+      ...prev,
+      [selectedRole]: updatedRolePerms,
+    }));
+  };
+
+  // Toggle single capability switch inside Fine-tune bottom sheet or Time-limit card
+  const handleToggleCapabilityInDraft = (key: keyof RolePermissions) => {
+    if (selectedRole === 'admin') return; // Owner locked
+    if (!isAdmin) {
+      showNotification('Administrator privileges required.');
+      return;
+    }
+    if (key === 'changeWindow') return;
+
+    const updatedRolePerms: RolePermissions = {
+      ...workingPerms,
+      [key]: !workingPerms[key],
+    };
+
+    setDraftRolePermissions((prev) => ({
+      ...prev,
+      [selectedRole]: updatedRolePerms,
+    }));
+  };
+
+  const handleSetChangeWindowInDraft = (win: ChangeWindow) => {
+    if (selectedRole === 'admin') return;
+    if (!isAdmin) {
+      showNotification('Administrator privileges required.');
+      return;
+    }
+    const updatedRolePerms: RolePermissions = {
+      ...workingPerms,
+      changeWindow: win,
+    };
+    setDraftRolePermissions((prev) => ({
+      ...prev,
+      [selectedRole]: updatedRolePerms,
+    }));
+  };
+
+  // Save changes to Firestore and return to Screen 1 (All roles)
+  const handleSaveChanges = async () => {
+    if (!isAdmin) {
+      showNotification('Administrator privileges required to save permissions.');
+      return;
+    }
+    if (!isDirty || selectedRole === 'admin') return;
+
+    setIsSaving(true);
+    try {
+      await setRoleFullPermissions(selectedRole as UserRole, workingPerms);
+      setDraftRolePermissions((prev) => {
+        const next = { ...prev };
+        delete next[selectedRole];
+        return next;
+      });
+      showNotification(
+        `Permissions for ${selectedRoleDisplayName} saved successfully.`
+      );
+      closeRoleDetailCleanly();
+    } catch (err: any) {
+      showNotification(`Failed to save permissions: ${err?.message || err}`);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // Undo changes
+  const handleUndoChanges = () => {
+    if (!isDirty) return;
+    setDraftRolePermissions((prev) => {
+      const next = { ...prev };
+      delete next[selectedRole];
+      return next;
+    });
+    showNotification('Unsaved changes reverted.');
+  };
+
+  // Prompt to copy permissions from another role
+  const promptCopyFrom = (sourceRoleId: string, sourceTitle: string) => {
+    const targetTitle = selectedRoleDisplayName;
+    setConfirmDialog({
+      isOpen: true,
+      title: 'Copy Permissions?',
+      message: `Copy all access permissions from "${sourceTitle}" into "${targetTitle}"? This will overwrite the working permissions for ${targetTitle}.`,
+      confirmLabel: 'Copy Permissions',
+      onConfirm: () => {
+        const sourcePerms =
+          sourceRoleId === 'admin'
+            ? getWorkingPermissions('admin')
+            : getRoleEffectivePermissions(sourceRoleId);
+        setDraftRolePermissions((prev) => ({
+          ...prev,
+          [selectedRole]: { ...sourcePerms },
+        }));
+        showNotification(
+          `Permissions copied from ${sourceTitle} into ${targetTitle}. Review and tap Save.`
+        );
+      },
+    });
+  };
+
+  // Prompt reset single role to default
+  const promptResetSingleRole = (targetRole: UserRole) => {
+    const defaultPerms = ROLE_PERMISSIONS[targetRole as keyof typeof ROLE_PERMISSIONS];
+    if (!defaultPerms) return;
+    const roleTitle = selectedRoleDisplayName;
+    setConfirmDialog({
+      isOpen: true,
+      title: `Reset ${roleTitle} to Factory Defaults?`,
+      message: `Restore ${roleTitle} permissions to the standard baseline configuration?`,
+      confirmLabel: 'Reset to Default',
+      isDestructive: true,
+      onConfirm: async () => {
+        try {
+          await setRoleFullPermissions(targetRole, defaultPerms);
+          setDraftRolePermissions((prev) => {
+            const next = { ...prev };
+            delete next[targetRole];
+            return next;
+          });
+          showNotification(`${roleTitle} restored to factory baseline.`);
+        } catch (err: any) {
+          showNotification(`Failed to reset: ${err?.message || err}`);
+        }
+      },
+    });
+  };
+
+  const getAccessChipStyle = (level: SectionEvalLevel): string => {
+    switch (level) {
+      case 'Full':
+        return 'bg-emerald-50 text-emerald-700 border-emerald-200';
+      case 'Work':
+        return 'bg-blue-50 text-blue-700 border-blue-200';
+      case 'View':
+        return 'bg-slate-100 text-slate-700 border-slate-200';
+      case 'Custom':
+        return 'bg-amber-50 text-amber-800 border-amber-200';
+      case 'Hidden':
+      default:
+        return 'bg-slate-50 text-slate-400 border-slate-200/70 line-through';
+    }
+  };
 
   return (
-    <div className="space-y-6 max-w-7xl mx-auto pb-12">
+    <div className="space-y-5 max-w-7xl mx-auto pb-16">
       {/* Action Feedback Banner */}
       {actionFeedback && (
         <div className="p-3.5 rounded-2xl bg-indigo-50 border border-indigo-200 text-indigo-900 text-xs flex items-center justify-between shadow-2xs animate-in fade-in slide-in-from-top-1 duration-200">
@@ -1011,461 +1917,655 @@ export const TeamView: React.FC = () => {
         </div>
       )}
 
-      {/* ========================================================================= */}
-      {/* VIEW A: DEDICATED SEPARATE ACCESS CONTROL PAGE FOR SELECTED ROLE         */}
-      {/* ========================================================================= */}
-      {selectedRoleDef && selectedRolePerms ? (
-        <div className="space-y-6 animate-in fade-in duration-200">
-          {/* Top Navigation & Breadcrumbs */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <button
-              type="button"
-              onClick={() => setSelectedRoleId(null)}
-              className="inline-flex items-center gap-2 text-xs font-bold text-indigo-700 bg-white hover:bg-indigo-50 px-3.5 py-2 rounded-xl border border-indigo-200 transition shadow-2xs cursor-pointer w-fit"
-            >
-              <ArrowLeft className="w-4 h-4" />
-              <span>← Back to All Roles</span>
-            </button>
-
-            <div className="flex items-center gap-2 text-xs text-slate-500">
-              <span className="hover:text-slate-700 cursor-pointer" onClick={() => setSelectedRoleId(null)}>
-                Role Rights & Access Control
+      {/* Top navigation tabs: Roles vs Team Directory */}
+      {isAdmin && (
+        <div className="flex border-b border-slate-200 gap-2">
+          <button
+            type="button"
+            onClick={() => handleSelectTab('roles')}
+            className={`flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 transition cursor-pointer ${
+              activeTab === 'roles'
+                ? 'border-indigo-600 text-indigo-600 bg-indigo-50/50 rounded-t-xl'
+                : 'border-transparent text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            <ShieldCheck className="w-4 h-4" />
+            <span>Roles</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => handleSelectTab('team')}
+            className={`flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 transition cursor-pointer relative ${
+              activeTab === 'team'
+                ? 'border-indigo-600 text-indigo-600 bg-indigo-50/50 rounded-t-xl'
+                : 'border-transparent text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            <Users className="w-4 h-4" />
+            <span>Team &amp; Member Access</span>
+            {pendingUsers.length > 0 && (
+              <span className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500 text-white animate-pulse">
+                {pendingUsers.length}
               </span>
-              <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
-              <span className="font-bold text-slate-900 capitalize">{selectedRoleDef.title}</span>
-            </div>
-          </div>
+            )}
+          </button>
+        </div>
+      )}
 
-          {/* Role Header Banner Card */}
-          <div className="bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 shadow-2xs relative overflow-hidden">
-            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-5">
-              <div className="flex items-start gap-4">
-                <div
-                  className={`w-14 h-14 rounded-2xl flex items-center justify-center text-white font-bold text-xl shadow-xs shrink-0 ${
-                    getRoleColorTheme(selectedRoleDef.color).bg
-                  }`}
+      {activeTab === 'roles' ? (
+        editingRoleId === null ? (
+          /* =================================================================== */
+          /* SCREEN 1 — ALL ROLES                                                */
+          /* =================================================================== */
+          <div className="space-y-4">
+            {/* Top right: "＋ New Role" button */}
+            {canManageTeam && (
+              <div className="flex items-center justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleClonePreset('staff');
+                    setNewRoleTitle('');
+                    setNewRoleId('');
+                    setRoleModalError(null);
+                    setIsAddRoleModalOpen(true);
+                  }}
+                  className="px-3.5 py-2 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 shadow-xs transition inline-flex items-center gap-1.5 cursor-pointer shrink-0 active:scale-95"
                 >
-                  {selectedRoleDef.id === 'admin' ? (
-                    <Crown className="w-7 h-7 text-white" />
-                  ) : (
-                    <Shield className="w-7 h-7 text-white" />
-                  )}
-                </div>
-
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <h2 className="text-xl font-bold text-slate-900">{selectedRoleDef.title}</h2>
-                    <span
-                      className={`text-xs font-bold px-2.5 py-0.5 rounded-full border ${getBadgeClass(
-                        selectedRoleDef.color
-                      )}`}
-                    >
-                      {selectedRoleDef.isSystem ? 'Built-in System Role' : 'Custom Role'}
-                    </span>
-                    <span className="text-[11px] font-mono text-slate-500 bg-slate-100 px-2 py-0.5 rounded-md">
-                      slug: {selectedRoleDef.id}
-                    </span>
-                  </div>
-                  <div className="pt-1 flex items-center gap-3 text-xs text-slate-500 flex-wrap">
-                    <span className="inline-flex items-center gap-1 font-semibold text-indigo-700">
-                      <Sliders className="w-3.5 h-3.5" />
-                      <span>
-                        {getEnabledCount(selectedRoleDef.id)} of {CAPABILITY_LIST.length} capabilities
-                        allowed
-                      </span>
-                    </span>
-                    <span>•</span>
-                    <span className="text-emerald-700 font-medium">Real-time Cloud Sync Active</span>
-                  </div>
-                </div>
+                  <span>＋ New Role</span>
+                </button>
               </div>
+            )}
 
-              {/* Header Actions: Simulate Persona, Grant All, Revoke All, Reset */}
-              <div className="flex flex-wrap items-center gap-2 pt-2 lg:pt-0">
-                {/* Switch to this role button (Admin preview only) */}
-                {isRealAdmin && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      switchSimulatedRole(selectedRoleDef.id as UserRole);
-                      showNotification(`Active preview persona switched to ${selectedRoleDef.title}.`);
-                    }}
-                    className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold transition cursor-pointer border ${
-                      role === selectedRoleDef.id
-                        ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
-                        : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border-indigo-200'
-                    }`}
-                    title="Preview Power Track under this role's rights (Admin Only)"
-                  >
-                    <Sparkles className="w-3.5 h-3.5" />
-                    <span>
-                      {role === selectedRoleDef.id ? 'Currently Active Preview' : 'Test as this Role'}
-                    </span>
-                  </button>
-                )}
-
-                {isAdmin && (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => handleGrantAll(selectedRoleDef.id as UserRole)}
-                      className="inline-flex items-center gap-1 px-3 py-2 rounded-xl text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 transition cursor-pointer"
-                      title="Turn ON all capabilities for this role"
-                    >
-                      <CheckCheck className="w-3.5 h-3.5 text-emerald-600" />
-                      <span>Grant All</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => handleRevokeAll(selectedRoleDef.id as UserRole)}
-                      className="inline-flex items-center gap-1 px-3 py-2 rounded-xl text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 transition cursor-pointer"
-                      title="Turn OFF all non-essential capabilities"
-                    >
-                      <Ban className="w-3.5 h-3.5 text-rose-600" />
-                      <span>Revoke All</span>
-                    </button>
-
-                    {selectedRoleDef.isSystem && (
-                      <button
-                        type="button"
-                        onClick={() => handleResetSingleRole(selectedRoleDef.id as UserRole)}
-                        className="inline-flex items-center gap-1 px-3 py-2 rounded-xl text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 transition cursor-pointer"
-                        title="Restore factory default rights"
-                      >
-                        <RotateCcw className="w-3.5 h-3.5 text-slate-500" />
-                        <span>Reset</span>
-                      </button>
-                    )}
-
-                    {!selectedRoleDef.isSystem && (
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteCustomRole(selectedRoleDef)}
-                        className="inline-flex items-center gap-1 px-3 py-2 rounded-xl text-xs font-semibold text-rose-700 bg-white hover:bg-rose-50 border border-rose-200 transition cursor-pointer"
-                        title="Delete custom role"
-                      >
-                        <Trash2 className="w-3.5 h-3.5 text-rose-600" />
-                        <span>Delete Role</span>
-                      </button>
-                    )}
-                  </>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* Capabilities Control Panel */}
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
-            <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <div>
-                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                  <Sliders className="w-4 h-4 text-indigo-600" />
-                  <span>Access Control Switches for {selectedRoleDef.title}</span>
-                </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Tap any switch to permit or restrict this role from performing that specific action
-                </p>
-              </div>
-
-              {!isAdmin && (
-                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium bg-amber-50 text-amber-800 border border-amber-200">
-                  <Lock className="w-3.5 h-3.5" />
-                  <span>Read-Only (Requires Admin Persona)</span>
-                </span>
-              )}
-            </div>
-
-            {/* List of Capabilities */}
-            <div className="divide-y divide-slate-100 p-2 sm:p-4">
-              {CAPABILITY_LIST.filter(
-                (cap) => selectedRoleDef.id === 'admin' || cap.key !== 'canManageUsers'
-              ).map((cap) => {
-                const isAllowed = selectedRolePerms[cap.key] ?? false;
-                const isLockedAdmin =
-                  selectedRoleDef.id === 'admin' && cap.key === 'canManageUsers';
-                const IconComponent = cap.icon;
+            {/* One clickable card per role */}
+            <div className="space-y-3">
+              {allRoles.map((r) => {
+                const isOwner = r.id === 'admin';
+                const displayName = getRoleDisplayName(r);
+                const memberCount = getRoleMemberCount(r.id);
+                const roleSavedPerms = getRoleEffectivePermissions(r.id);
+                const hasUnsavedDraft = getRoleDiffCount(r.id) > 0;
 
                 return (
                   <div
-                    key={`cap-${cap.key}`}
-                    className={`p-4 sm:p-5 rounded-2xl transition flex flex-col sm:flex-row sm:items-center justify-between gap-4 ${
-                      isAllowed ? 'hover:bg-indigo-50/20' : 'hover:bg-slate-50'
-                    }`}
+                    key={`role-card-${r.id}`}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => openRoleDetail(r.id)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        openRoleDetail(r.id);
+                      }
+                    }}
+                    className="bg-white rounded-2xl border border-slate-200 hover:border-indigo-300 hover:shadow-sm p-4 transition cursor-pointer flex flex-col gap-2.5"
                   >
-                    {/* Left: Capability Info */}
-                    <div className="flex items-start gap-3.5 flex-1 min-w-0">
-                      <div
-                        className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
-                          isAllowed
-                            ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                            : 'bg-slate-100 text-slate-500 border border-slate-200'
-                        }`}
-                      >
-                        <IconComponent className="w-5 h-5" />
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1 space-y-2">
+                        {/* Role name (bold) + Custom badge + member count */}
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-sm sm:text-base font-bold text-slate-900">
+                            {displayName}
+                          </span>
+                          {!r.isSystem && (
+                            <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-purple-50 text-purple-700 border border-purple-200">
+                              Custom
+                            </span>
+                          )}
+                          <span className="text-xs text-slate-500 font-medium">
+                            · {formatMemberCount(memberCount)}
+                          </span>
+                          {hasUnsavedDraft && (
+                            <span
+                              className="w-2 h-2 rounded-full bg-amber-400 shrink-0"
+                              title="Unsaved changes"
+                            />
+                          )}
+                        </div>
+
+                        {/* Summary chips OR Owner lock line */}
+                        {isOwner ? (
+                          <div className="flex items-center gap-1.5 text-xs font-medium text-slate-600">
+                            <Lock className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                            <span>Full access · cannot be changed</span>
+                          </div>
+                        ) : (
+                          <div className="line-clamp-2 overflow-hidden leading-6 text-xs text-slate-400">
+                            {SECTIONS.map((sec) => {
+                              const evalRes = evaluateSectionLevel(sec, roleSavedPerms);
+                              const shortLabel = SECTION_SHORT_LABELS[sec.id] || sec.name;
+                              return (
+                                <span
+                                  key={`chip-${r.id}-${sec.id}`}
+                                  className={`inline-block px-2 py-0.5 mr-1.5 mb-1 rounded-md text-[11px] leading-4 font-semibold border align-middle whitespace-nowrap ${getAccessChipStyle(
+                                    evalRes.level
+                                  )}`}
+                                >
+                                  {shortLabel} {evalRes.displayLevel}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        )}
                       </div>
 
-                      <div className="space-y-1 min-w-0 flex-1">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <h4 className="text-sm font-bold text-slate-900">{cap.title}</h4>
-                          <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 bg-slate-100 px-2 py-0.5 rounded">
-                            {cap.categoryLabel}
-                          </span>
-                        </div>
-                        <p className="text-xs text-slate-500 leading-relaxed">
-                          {isAllowed ? cap.allowedDesc : cap.deniedDesc}
-                        </p>
-                      </div>
+                      {/* Right arrow › */}
+                      <ChevronRight className="w-5 h-5 text-slate-400 shrink-0 mt-0.5" />
                     </div>
 
-                    {/* Right: Toggle Switch & Status Label */}
-                    <div className="flex items-center justify-between sm:justify-end gap-3.5 shrink-0 pl-13 sm:pl-0">
-                      <span
-                        className={`text-xs font-bold inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border ${
-                          isAllowed
-                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                            : 'bg-slate-100 text-slate-600 border-slate-200'
-                        }`}
-                      >
-                        {isAllowed ? (
-                          <>
-                            <Check className="w-3 h-3 stroke-[3]" />
-                            <span>ALLOWED</span>
-                          </>
-                        ) : (
-                          <>
-                            <Lock className="w-3 h-3" />
-                            <span>RESTRICTED</span>
-                          </>
-                        )}
-                      </span>
+                    {/* Bottom-right: 👁 Test this role (every role except Owner, only for users who can manage team / admins) */}
+                    {!isOwner && canManageTeam && (
+                      <div className="flex items-center justify-end pt-0.5">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleTriggerTestRole(r.id);
+                          }}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold text-slate-700 bg-slate-50 hover:bg-indigo-50 hover:text-indigo-700 border border-slate-200 hover:border-indigo-200 transition cursor-pointer active:scale-95"
+                        >
+                          <span aria-hidden="true">👁</span>
+                          <span>Test this role</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ) : (
+          /* =================================================================== */
+          /* SCREEN 2 — ROLE DETAIL                                              */
+          /* =================================================================== */
+          <div className="space-y-4">
+            {/* Top bar: ← All roles, role name, member count, 👁 Test this role, ⋮ menu */}
+            <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between">
+              <div className="space-y-1 min-w-0">
+                <button
+                  type="button"
+                  onClick={handleBackToAllRoles}
+                  className="inline-flex items-center gap-1.5 text-xs font-semibold text-indigo-600 hover:text-indigo-800 transition cursor-pointer"
+                >
+                  <ArrowLeft className="w-4 h-4 shrink-0" />
+                  <span>All roles</span>
+                </button>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h2 className="text-lg font-bold text-slate-900">
+                    {selectedRoleDisplayName}
+                  </h2>
+                  {!selectedRoleDef?.isSystem && (
+                    <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-purple-50 text-purple-700 border border-purple-200">
+                      Custom
+                    </span>
+                  )}
+                  <span className="text-xs text-slate-500 font-medium">
+                    · {formatMemberCount(getRoleMemberCount(selectedRole))}
+                  </span>
+                </div>
+              </div>
 
-                      {/* Interactive Toggle Switch */}
+              {/* Right actions (Hidden for Owner) */}
+              {selectedRole !== 'admin' && canManageTeam && (
+                <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => handleTriggerTestRole(selectedRole)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-slate-700 bg-white hover:bg-indigo-50 hover:text-indigo-700 border border-slate-200 hover:border-indigo-200 shadow-2xs transition cursor-pointer active:scale-95"
+                  >
+                    <span aria-hidden="true">👁</span>
+                    <span>Test this role</span>
+                  </button>
+
+                  {isAdmin && (
+                    <div className="relative shrink-0" ref={menuRef}>
                       <button
                         type="button"
-                        role="switch"
-                        aria-checked={isAllowed}
-                        disabled={!isAdmin || isLockedAdmin}
-                        onClick={() =>
-                          handleToggleCapability(
-                            selectedRoleDef.id as UserRole,
-                            cap.key,
-                            isAllowed
-                          )
-                        }
-                        title={
-                          isLockedAdmin
-                            ? 'Administrator must keep User Management rights to prevent lockout'
-                            : !isAdmin
-                            ? 'Admin privileges required'
-                            : `Toggle ${cap.title}`
-                        }
-                        className={`relative inline-flex h-7 w-12 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 ${
-                          isAllowed ? 'bg-indigo-600' : 'bg-slate-300'
-                        } ${!isAdmin || isLockedAdmin ? 'opacity-60 cursor-not-allowed' : ''}`}
+                        onClick={() => setIsMenuOpen((v) => !v)}
+                        className="w-8 h-8 rounded-xl bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 flex items-center justify-center transition cursor-pointer shadow-2xs"
+                        title="Role options"
                       >
-                        <span
-                          className={`pointer-events-none inline-block h-6 w-6 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out flex items-center justify-center ${
-                            isAllowed ? 'translate-x-5' : 'translate-x-0'
-                          }`}
-                        >
-                          {isAllowed ? (
-                            <Check className="w-3.5 h-3.5 text-indigo-600 stroke-[3]" />
-                          ) : (
-                            <X className="w-3 h-3 text-slate-400 stroke-[2.5]" />
-                          )}
-                        </span>
+                        <MoreVertical className="w-4 h-4" />
                       </button>
+
+                      {isMenuOpen && (
+                        <div className="absolute right-0 top-full mt-1.5 w-52 bg-white rounded-2xl shadow-xl border border-slate-200 py-1.5 z-40 animate-in fade-in zoom-in-95 duration-100">
+                          {/* Test this role */}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setIsMenuOpen(false);
+                              handleTriggerTestRole(selectedRole);
+                            }}
+                            className="w-full text-left px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-indigo-50 hover:text-indigo-700 flex items-center gap-2 transition cursor-pointer"
+                          >
+                            <span aria-hidden="true">👁</span>
+                            <span>Test this role</span>
+                          </button>
+
+                          {/* Copy from… */}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setIsMenuOpen(false);
+                              setIsCopyFromModalOpen(true);
+                            }}
+                            className="w-full text-left px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-indigo-50 hover:text-indigo-700 flex items-center gap-2 transition cursor-pointer"
+                          >
+                            <Copy className="w-3.5 h-3.5 text-slate-400" />
+                            <span>Copy from…</span>
+                          </button>
+
+                          {/* ↺ Reset to default */}
+                          {selectedRoleDef?.isSystem && selectedRole !== 'admin' && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setIsMenuOpen(false);
+                                promptResetSingleRole(selectedRole as UserRole);
+                              }}
+                              className="w-full text-left px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 flex items-center gap-2 transition cursor-pointer"
+                            >
+                              <RotateCcw className="w-3.5 h-3.5 text-slate-400" />
+                              <span>↺ Reset to default</span>
+                            </button>
+                          )}
+
+                          {/* Custom role actions: Rename & Delete role */}
+                          {!selectedRoleDef?.isSystem && (
+                            <>
+                              <div className="my-1 border-t border-slate-100" />
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setIsMenuOpen(false);
+                                  setRenameTitleInput(selectedRoleDef?.title || '');
+                                  setRenameError(null);
+                                  setIsRenameModalOpen(true);
+                                }}
+                                className="w-full text-left px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 flex items-center gap-2 transition cursor-pointer"
+                              >
+                                <Pencil className="w-3.5 h-3.5 text-slate-400" />
+                                <span>Rename</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setIsMenuOpen(false);
+                                  handleDeleteCustomRole(selectedRoleDef!);
+                                }}
+                                className="w-full text-left px-3.5 py-2 text-xs font-semibold text-rose-600 hover:bg-rose-50 flex items-center gap-2 transition cursor-pointer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5 text-rose-500" />
+                                <span>Delete role</span>
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      )}
                     </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Small grey line explaining the levels */}
+            <p className="text-xs text-slate-500">
+              Hidden = can&apos;t see · View = look only · Work = create &amp; update · Full = also edit &amp; delete
+            </p>
+
+            {/* Owner read-only banner */}
+            {selectedRole === 'admin' && (
+              <div className="p-3 sm:p-3.5 rounded-xl bg-amber-50/80 border border-amber-200 text-amber-900 text-xs font-semibold flex items-center gap-2.5 shadow-2xs">
+                <Lock className="w-4 h-4 text-amber-600 shrink-0" />
+                <span>Full access · cannot be changed (Owner always has full access)</span>
+              </div>
+            )}
+
+            {/* T3 Section Cards (Hidden / View / Work / Full + Fine-tune ›) */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5 sm:gap-4">
+              {SECTIONS.map((section) => {
+                const evalResult = evaluateSectionLevel(section, workingPerms);
+                const isOwner = selectedRole === 'admin';
+                const isTeam = section.id === 'team';
+                const options: AccessLevel[] = isTeam
+                  ? ['Hidden', 'View', 'Full']
+                  : ['Hidden', 'View', 'Work', 'Full'];
+
+                return (
+                  <div
+                    key={`section-card-${section.id}`}
+                    className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-4.5 shadow-2xs space-y-3 flex flex-col justify-between"
+                  >
+                    <div>
+                      {/* Header */}
+                      <div className="flex items-center justify-between gap-2 mb-2.5">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="text-lg shrink-0">{section.icon}</span>
+                          <h3 className="text-sm font-bold text-slate-900 truncate">
+                            {section.name}
+                          </h3>
+                          {!isOwner && evalResult.level === 'Custom' && (
+                            <span
+                              className={`px-2 py-0.5 rounded-md text-[11px] leading-4 font-semibold border shrink-0 ${getAccessChipStyle(
+                                evalResult.level
+                              )}`}
+                            >
+                              {evalResult.displayLevel}
+                            </span>
+                          )}
+                        </div>
+                        {!isOwner ? (
+                          <button
+                            type="button"
+                            onClick={() => setFineTuneSection(section)}
+                            className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 transition cursor-pointer shrink-0"
+                          >
+                            Fine-tune ›
+                          </button>
+                        ) : (
+                          <span className="text-[11px] font-medium text-slate-400 flex items-center gap-1 shrink-0">
+                            <Lock className="w-3 h-3" />
+                            Locked
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Segmented Control */}
+                      <div
+                        className={`grid ${
+                          isTeam ? 'grid-cols-3' : 'grid-cols-4'
+                        } gap-1 p-1 bg-slate-100 rounded-xl select-none`}
+                      >
+                        {options.map((opt) => {
+                          const isSelected = isOwner
+                            ? opt === 'Full'
+                            : evalResult.level === opt;
+                          const buttonLabel = isOwner
+                            ? opt
+                            : isSelected
+                            ? evalResult.displayLevel
+                            : opt;
+
+                          return (
+                            <button
+                              key={`${section.id}-${opt}`}
+                              type="button"
+                              disabled={isOwner || !isAdmin}
+                              onClick={() => handleSetSectionLevel(section, opt)}
+                              className={`py-2 text-xs rounded-lg transition font-bold text-center ${
+                                isSelected
+                                  ? 'bg-indigo-600 text-white shadow-xs'
+                                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
+                              } ${isOwner || !isAdmin ? 'cursor-default' : 'cursor-pointer'}`}
+                            >
+                              {buttonLabel}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* One small grey line saying what this role can do */}
+                    <p className="text-xs text-slate-500 leading-relaxed min-h-[18px]">
+                      {isOwner ? section.descriptions.full : evalResult.summary}
+                    </p>
                   </div>
                 );
               })}
             </div>
 
-            {/* Footer with helpful guidance */}
-            <div className="p-4 bg-slate-50 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500 flex-wrap gap-2">
-              <div className="flex items-center gap-1.5">
-                <Info className="w-4 h-4 text-slate-400 shrink-0" />
-                <span>
-                  All changes take effect immediately across all connected client devices in real-time.
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setSelectedRoleId(null)}
-                className="font-bold text-indigo-600 hover:text-indigo-800 cursor-pointer"
-              >
-                ← Return to Role List
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : (
-        /* ========================================================================= */
-        /* VIEW B: LIST OF EACH ROLE (CLICKABLE TO OPEN SEPARATE ACCESS PAGE)        */
-        /* ========================================================================= */
-        <div className="space-y-5">
-          {/* Top navigation tabs: Role Rights vs Team Directory */}
-          {isRealAdmin && (
-            <div className="flex border-b border-slate-200 gap-2">
-              <button
-                type="button"
-                onClick={() => setActiveTab('roles')}
-                className={`flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 transition cursor-pointer ${
-                  activeTab === 'roles'
-                    ? 'border-indigo-600 text-indigo-600 bg-indigo-50/50 rounded-t-xl'
-                    : 'border-transparent text-slate-500 hover:text-slate-800'
-                }`}
-              >
-                <ShieldCheck className="w-4 h-4" />
-                <span>Role Rights & Access Control</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveTab('team')}
-                className={`flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-semibold border-b-2 transition cursor-pointer relative ${
-                  activeTab === 'team'
-                    ? 'border-indigo-600 text-indigo-600 bg-indigo-50/50 rounded-t-xl'
-                    : 'border-transparent text-slate-500 hover:text-slate-800'
-                }`}
-              >
-                <Users className="w-4 h-4" />
-                <span>Team & Member Access</span>
-                {pendingUsers.length > 0 && (
-                  <span className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500 text-white animate-pulse">
-                    {pendingUsers.length}
+            {/* Time limit for changes card */}
+            <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-4.5 shadow-2xs space-y-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-start gap-2.5 min-w-0">
+                  <div className="w-8 h-8 rounded-xl bg-amber-50 border border-amber-200 text-amber-700 flex items-center justify-center shrink-0">
+                    <Clock className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0">
+                    <h3 className="text-sm font-bold text-slate-900">Time limit for changes</h3>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Controls editing or removing sales bills, payments, stock entries, and production batches
+                    </p>
+                  </div>
+                </div>
+                {selectedRole === 'admin' && (
+                  <span className="text-[11px] font-medium text-slate-400 flex items-center gap-1 shrink-0">
+                    <Lock className="w-3 h-3" />
+                    Locked
                   </span>
                 )}
-              </button>
-            </div>
-          )}
-
-          {activeTab === 'roles' ? (
-            <div className="space-y-5">
-              {/* Header */}
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div>
-                  <h1 className="text-xl font-bold text-slate-900 tracking-tight">
-                    Role Rights & Access Control
-                  </h1>
-                </div>
-
-                {/* Action Buttons: Add Role + Reset Defaults (Only shown when admin) */}
-                {isAdmin && (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        handleClonePreset('staff');
-                        setNewRoleTitle('');
-                        setNewRoleId('');
-                        setRoleModalError(null);
-                        setIsAddRoleModalOpen(true);
-                      }}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 active:scale-95 transition shadow-xs cursor-pointer"
-                    >
-                      <Plus className="w-4 h-4" />
-                      <span>+ Add Role</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={handleResetAllDefaults}
-                      title="Reset all built-in role permissions to standard baseline defaults"
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 hover:border-slate-300 transition shadow-2xs cursor-pointer"
-                    >
-                      <RotateCcw className="w-3.5 h-3.5 text-slate-500" />
-                      <span>Reset Defaults</span>
-                    </button>
-                  </div>
-                )}
               </div>
 
-              {/* LIST OF ROLES */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 sm:gap-3">
-                {allRoles.map((r, rIdx) => {
-                  const theme = getRoleColorTheme(r.color);
-
-                  return (
-                    <div
-                      key={`role-card-${r.id || rIdx}`}
-                      onClick={() => setSelectedRoleId(r.id)}
-                      className="p-3.5 sm:p-4 bg-white rounded-2xl border border-slate-200 hover:border-indigo-300 shadow-2xs hover:shadow-md transition cursor-pointer flex items-center justify-between gap-3 group active:scale-[0.99] relative overflow-hidden"
-                    >
-                      {/* Top colored accent indicator */}
-                      <div
-                        className={`absolute top-0 left-0 right-0 h-1 ${theme.bg}`}
-                      />
-
-                      {/* Left: Icon + Title + System/Custom badge + slug */}
-                      <div className="flex items-center gap-3 min-w-0">
-                        <div
-                          className={`w-11 h-11 rounded-xl flex items-center justify-center font-bold text-base shadow-xs shrink-0 text-white ${theme.bg}`}
-                        >
-                          {r.id === 'admin' ? (
-                            <Crown className="w-5 h-5 text-white" />
-                          ) : (
-                            <Shield className="w-5 h-5 text-white" />
-                          )}
-                        </div>
-
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <h3 className="text-sm sm:text-base font-bold text-slate-900 group-hover:text-indigo-600 transition truncate">
-                              {r.title}
-                            </h3>
-                            <span
-                              className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${getBadgeClass(
-                                r.color
-                              )}`}
-                            >
-                              {r.isSystem ? 'System' : 'Custom'}
-                            </span>
-                          </div>
-                          <span className="text-[11px] font-mono text-slate-400 block mt-0.5">
-                            slug: {r.id}
-                          </span>
-                        </div>
-                      </div>
-
-                      {/* Right: Chevron indicating click to enter */}
-                      <div className="w-8 h-8 rounded-xl bg-slate-50 group-hover:bg-indigo-50 border border-slate-200 group-hover:border-indigo-200 text-slate-400 group-hover:text-indigo-600 flex items-center justify-center transition shrink-0">
-                        <ChevronRight className="w-4 h-4 group-hover:translate-x-0.5 transition" />
-                      </div>
-                    </div>
-                  );
-                })}
-
-                {/* Add Custom Role Prompt Card */}
-                {isAdmin && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      handleClonePreset('staff');
-                      setNewRoleTitle('');
-                      setNewRoleId('');
-                      setRoleModalError(null);
-                      setIsAddRoleModalOpen(true);
-                    }}
-                    className="rounded-2xl border-2 border-dashed border-indigo-200 hover:border-indigo-400 bg-indigo-50/20 hover:bg-indigo-50/50 p-4 text-center transition flex flex-col items-center justify-center gap-1.5 cursor-pointer"
-                  >
-                    <div className="w-9 h-9 rounded-xl bg-indigo-100 text-indigo-600 flex items-center justify-center">
-                      <Plus className="w-4 h-4" />
-                    </div>
-                    <div>
-                      <h4 className="text-xs sm:text-sm font-bold text-indigo-950">+ Add New Custom Role</h4>
-                      <p className="text-[11px] text-slate-500 max-w-xs mt-0.5">
-                        Create roles like Shift Supervisor, Quality Inspector, Auditor, or Kitchen Staff
+              {selectedRole === 'admin' ? (
+                <div className="px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-700 flex items-center justify-between gap-2">
+                  <span>No limit · all entries</span>
+                  <span className="text-[11px] font-normal text-slate-500">Owner</span>
+                </div>
+              ) : (
+                <div className="space-y-3 pt-1">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-xs font-bold text-slate-900">Change window</p>
+                      <p className="text-[11px] text-slate-500">
+                        After this window passes, past entries lock automatically
                       </p>
                     </div>
-                    <span className="text-[11px] font-semibold text-indigo-600 bg-white px-2.5 py-1 rounded-lg border border-indigo-200 shadow-2xs mt-1">
-                      Create Role
-                    </span>
-                  </button>
+                    <select
+                      value={workingPerms.changeWindow || '2h'}
+                      disabled={!isAdmin}
+                      onChange={(e) => handleSetChangeWindowInDraft(e.target.value as ChangeWindow)}
+                      aria-label="Time limit for changes"
+                      className="h-9 px-3 text-xs font-bold bg-slate-50 border border-slate-300 rounded-xl text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-60 shrink-0"
+                    >
+                      {CHANGE_WINDOW_OPTIONS.map((opt) => (
+                        <option key={opt.id} value={opt.id}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="pt-2.5 border-t border-slate-100 flex items-center justify-between gap-3">
+                    <div className="min-w-0 flex-1 pr-2">
+                      <p className="text-xs font-bold text-slate-900">
+                        Can change other people&apos;s entries
+                      </p>
+                      <p className="text-[11px] text-slate-500 leading-snug mt-0.5">
+                        When off, this role can only change entries they created themselves
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={Boolean(workingPerms.canChangeOthersEntries)}
+                      disabled={!isAdmin}
+                      onClick={() => handleToggleCapabilityInDraft('canChangeOthersEntries')}
+                      className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                        workingPerms.canChangeOthersEntries ? 'bg-indigo-600' : 'bg-slate-300'
+                      } ${!isAdmin ? 'opacity-60 cursor-not-allowed' : ''}`}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out flex items-center justify-center ${
+                          workingPerms.canChangeOthersEntries ? 'translate-x-5' : 'translate-x-0'
+                        }`}
+                      >
+                        {workingPerms.canChangeOthersEntries ? (
+                          <Check className="w-3 h-3 text-indigo-600 stroke-[3]" />
+                        ) : (
+                          <X className="w-2.5 h-2.5 text-slate-400 stroke-[2.5]" />
+                        )}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Sticky Bottom Bar: "{n} changes · Undo · Save" */}
+            <div
+              style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom))' }}
+              className="sticky bottom-0 z-30 -mx-4 sm:-mx-6 -mb-6 px-4 sm:px-6 py-3 bg-white/95 backdrop-blur-md border-t border-slate-200 shadow-lg flex items-center justify-between gap-3"
+            >
+              <div>
+                {selectedRole === 'admin' ? (
+                  <span className="text-xs font-medium text-slate-500 flex items-center gap-1.5">
+                    <Lock className="w-3.5 h-3.5 text-amber-600" />
+                    Owner always has full access
+                  </span>
+                ) : isDirty ? (
+                  <span className="text-xs font-bold text-amber-800 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-full flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                    {diffCount} change{diffCount > 1 ? 's' : ''}
+                  </span>
+                ) : hasAnyCustomMix ? (
+                  <span className="text-xs font-semibold text-slate-500 flex items-center gap-1">
+                    <span>✱ custom mix</span>
+                  </span>
+                ) : (
+                  <span className="text-xs text-slate-500">0 changes</span>
                 )}
               </div>
+
+              {selectedRole !== 'admin' && (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleUndoChanges}
+                    disabled={!isDirty || isSaving}
+                    className="text-xs font-semibold text-slate-600 hover:text-slate-900 disabled:opacity-40 disabled:cursor-not-allowed px-3 py-1.5 rounded-xl transition cursor-pointer"
+                  >
+                    Undo
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSaveChanges}
+                    disabled={!isDirty || isSaving}
+                    className="text-xs font-bold text-white bg-purple-600 hover:bg-purple-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed px-4 py-2 rounded-xl shadow-xs transition flex items-center gap-1.5 cursor-pointer"
+                  >
+                    {isSaving ? 'Saving...' : 'Save'}
+                  </button>
+                </div>
+              )}
             </div>
-          ) : (
+
+            {/* "Fine-tune ›" Bottom Sheet */}
+            {fineTuneSection && (() => {
+              const fineTuneEval = evaluateSectionLevel(fineTuneSection, workingPerms);
+              return (
+              <div
+                onClick={(e) => {
+                  if (e.target === e.currentTarget) setFineTuneSection(null);
+                }}
+                className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4"
+              >
+                <div
+                  style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+                  className="bg-white rounded-t-3xl sm:rounded-2xl max-w-xl w-full max-h-[85vh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden animate-in slide-in-from-bottom sm:zoom-in-95 duration-200"
+                >
+                  {/* Header */}
+                  <div className="px-5 py-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between shrink-0 gap-2">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <span className="text-xl shrink-0">{fineTuneSection.icon}</span>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <h3 className="text-sm font-bold text-slate-900">
+                            Fine-tune {fineTuneSection.name}
+                          </h3>
+                          <span
+                            className={`px-2 py-0.5 rounded-md text-[11px] leading-4 font-semibold border ${getAccessChipStyle(
+                              fineTuneEval.level
+                            )}`}
+                          >
+                            {fineTuneEval.displayLevel}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-500 truncate">
+                          {selectedRoleDisplayName} · {fineTuneEval.summary}
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setFineTuneSection(null)}
+                      className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-200/60 transition cursor-pointer shrink-0"
+                    >
+                      <X className="w-5 h-5" />
+                    </button>
+                  </div>
+
+                  {/* Switches List */}
+                  <div className="p-4 sm:p-5 divide-y divide-slate-100 overflow-y-auto space-y-1">
+                    {fineTuneSection.allKeys.map((key) => {
+                      const meta = PERMISSION_META[key];
+                      const isAllowed = Boolean(workingPerms[key]);
+                      const isLockedAdmin =
+                        selectedRole === 'admin' && key === 'canManageUsers';
+
+                      return (
+                        <div
+                          key={`finetune-${key}`}
+                          className="py-3 flex items-center justify-between gap-3"
+                        >
+                          <div className="min-w-0 flex-1 pr-2">
+                            <p className="text-xs font-bold text-slate-900">
+                              {meta?.shortName || key}
+                            </p>
+                            <p className="text-[11px] text-slate-500 leading-snug mt-0.5">
+                              {meta?.desc || ''}
+                            </p>
+                          </div>
+
+                          {/* Interactive iOS toggle switch */}
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={isAllowed}
+                            disabled={!isAdmin || isLockedAdmin || selectedRole === 'admin'}
+                            onClick={() => handleToggleCapabilityInDraft(key)}
+                            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                              isAllowed ? 'bg-indigo-600' : 'bg-slate-300'
+                            } ${
+                              !isAdmin || isLockedAdmin || selectedRole === 'admin'
+                                ? 'opacity-60 cursor-not-allowed'
+                                : ''
+                            }`}
+                          >
+                            <span
+                              className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out flex items-center justify-center ${
+                                isAllowed ? 'translate-x-5' : 'translate-x-0'
+                              }`}
+                            >
+                              {isAllowed ? (
+                                <Check className="w-3 h-3 text-indigo-600 stroke-[3]" />
+                              ) : (
+                                <X className="w-2.5 h-2.5 text-slate-400 stroke-[2.5]" />
+                              )}
+                            </span>
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Footer */}
+                  <div className="p-3.5 bg-slate-50 border-t border-slate-100 flex items-center justify-end">
+                    <button
+                      type="button"
+                      onClick={() => setFineTuneSection(null)}
+                      className="px-4 py-2 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl transition cursor-pointer shadow-xs"
+                    >
+                      Done
+                    </button>
+                  </div>
+                </div>
+              </div>
+              );
+            })()}
+          </div>
+        )
+      ) : (
             /* ======================================================================= */
             /* TEAM & MEMBER ACCESS (ADMIN ONLY)                                      */
             /* ======================================================================= */
@@ -1476,7 +2576,7 @@ export const TeamView: React.FC = () => {
                   <div className="flex items-center gap-2">
                     <Clock className="w-5 h-5 text-amber-500" />
                     <div>
-                      <h2 className="text-base font-bold text-slate-900">
+                      <h2 className="text-sm sm:text-base font-bold text-slate-900">
                         Pending User Approvals ({pendingUsers.length})
                       </h2>
                       <p className="text-xs text-slate-500">
@@ -1520,11 +2620,11 @@ export const TeamView: React.FC = () => {
                                   [pUser.uid]: e.target.value as UserRole,
                                 }))
                               }
-                              className="px-2.5 py-1.5 text-xs rounded-xl border border-slate-300 bg-white font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                              className="h-[38px] px-2.5 text-sm rounded-xl border border-slate-300 bg-white font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                             >
                               {allRoles.map((r) => (
                                 <option key={r.id} value={r.id}>
-                                  Assign as {r.title}
+                                  Assign as {getRoleDisplayName(r)}
                                 </option>
                               ))}
                             </select>
@@ -1559,7 +2659,7 @@ export const TeamView: React.FC = () => {
                 <div className="flex items-center gap-2">
                   <UserPlus className="w-5 h-5 text-indigo-600" />
                   <div>
-                    <h2 className="text-base font-bold text-slate-900">Invite New Team Member</h2>
+                    <h2 className="text-sm sm:text-base font-bold text-slate-900">Invite New Team Member</h2>
                     <p className="text-xs text-slate-500">
                       Pre-authorized emails automatically receive the chosen role upon signup and email verification
                     </p>
@@ -1575,20 +2675,20 @@ export const TeamView: React.FC = () => {
                       placeholder="colleague@domain.com"
                       value={inviteEmail}
                       onChange={(e) => setInviteEmail(e.target.value)}
-                      className="w-full pl-9 pr-3 py-2 text-xs rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
+                      className="w-full h-[38px] pl-9 pr-3 text-xs rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
                     />
                   </div>
 
                   <select
                     value={inviteRole}
                     onChange={(e) => setInviteRole(e.target.value as UserRole)}
-                    className="px-3 py-2 text-xs rounded-xl border border-slate-300 bg-white font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    className="h-[38px] px-3 text-sm rounded-xl border border-slate-300 bg-white font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
                     {allRoles
                       .filter((r) => r.id !== 'admin')
                       .map((r) => (
                         <option key={r.id} value={r.id}>
-                          {r.title}
+                          {getRoleDisplayName(r)}
                         </option>
                       ))}
                   </select>
@@ -1639,7 +2739,7 @@ export const TeamView: React.FC = () => {
                 <div className="flex items-center gap-2">
                   <Users className="w-5 h-5 text-emerald-600" />
                   <div>
-                    <h2 className="text-base font-bold text-slate-900">
+                    <h2 className="text-sm sm:text-base font-bold text-slate-900">
                       Team Directory ({teamMembers.length})
                     </h2>
                     <p className="text-xs text-slate-500">
@@ -1704,13 +2804,13 @@ export const TeamView: React.FC = () => {
                                 ? 'Owner role is protected'
                                 : 'Change this member role'
                             }
-                            className={`px-2.5 py-1.5 text-xs rounded-xl border border-slate-300 bg-white font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 ${
+                            className={`h-[38px] px-2.5 text-sm rounded-xl border border-slate-300 bg-white font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 ${
                               isRootAdmin ? 'bg-slate-100 cursor-not-allowed opacity-70' : ''
                             }`}
                           >
                             {allRoles.map((r) => (
                               <option key={r.id} value={r.id}>
-                                {r.title}
+                                {getRoleDisplayName(r)}
                               </option>
                             ))}
                           </select>
@@ -1754,8 +2854,6 @@ export const TeamView: React.FC = () => {
               </div>
             </div>
           )}
-        </div>
-      )}
 
       {/* ========================================================================= */}
       {/* MODAL DIALOG: ADD NEW CUSTOM ROLE                                         */}
@@ -1845,7 +2943,7 @@ export const TeamView: React.FC = () => {
                     required
                     value={newRoleTitle}
                     onChange={(e) => handleTitleChange(e.target.value)}
-                    placeholder="e.g., Shift Supervisor, Kitchen Lead, Quality Auditor"
+                    placeholder="e.g., Line Supervisor, QC Inspector, Store Keeper"
                     className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
                   />
                   <p className="text-[10px] text-slate-500 mt-0.5">Displayed on badges and cards</p>
@@ -1862,7 +2960,7 @@ export const TeamView: React.FC = () => {
                     onChange={(e) =>
                       setNewRoleId(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, '_'))
                     }
-                    placeholder="e.g., shift_supervisor"
+                    placeholder="e.g., line_supervisor"
                     className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50 font-mono text-slate-700"
                   />
                   <p className="text-[10px] text-slate-500 mt-0.5">Internal slug identifier</p>
@@ -1879,7 +2977,7 @@ export const TeamView: React.FC = () => {
                     type="text"
                     value={newRoleDesc}
                     onChange={(e) => setNewRoleDesc(e.target.value)}
-                    placeholder="e.g., Supervises floor shifts and verifies recipe batch executions."
+                    placeholder="e.g., Supervises assembly lines and verifies BOM batch executions."
                     className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
                   />
                 </div>
@@ -1972,6 +3070,177 @@ export const TeamView: React.FC = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Copy Permissions From Modal */}
+      {isCopyFromModalOpen && (
+        <div
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsCopyFromModalOpen(false);
+          }}
+          className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4"
+        >
+          <div className="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95 duration-150 space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-bold text-slate-900">Copy permissions from…</h3>
+              <button
+                type="button"
+                onClick={() => setIsCopyFromModalOpen(false)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="text-xs text-slate-500">
+              Choose a role to copy all access levels into {selectedRoleDisplayName}:
+            </p>
+            <div className="space-y-1.5 max-h-64 overflow-y-auto">
+              {allRoles
+                .filter((r) => r.id !== selectedRole)
+                .map((r) => {
+                  const rName = getRoleDisplayName(r);
+                  return (
+                    <button
+                      key={`copy-modal-${r.id}`}
+                      type="button"
+                      onClick={() => {
+                        setIsCopyFromModalOpen(false);
+                        promptCopyFrom(r.id, rName);
+                      }}
+                      className="w-full text-left px-3.5 py-2.5 rounded-xl border border-slate-200 hover:border-indigo-300 hover:bg-indigo-50/50 text-xs font-bold text-slate-800 flex items-center justify-between transition cursor-pointer"
+                    >
+                      <span>{rName}</span>
+                      <Copy className="w-3.5 h-3.5 text-slate-400" />
+                    </button>
+                  );
+                })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Rename Custom Role Modal */}
+      {isRenameModalOpen && (
+        <div
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsRenameModalOpen(false);
+          }}
+          className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4"
+        >
+          <form
+            onSubmit={handleSubmitRename}
+            className="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95 duration-150 space-y-3"
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-bold text-slate-900">Rename Role</h3>
+              <button
+                type="button"
+                onClick={() => setIsRenameModalOpen(false)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            {renameError && (
+              <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs">
+                {renameError}
+              </div>
+            )}
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                Role Name
+              </label>
+              <input
+                type="text"
+                required
+                autoFocus
+                value={renameTitleInput}
+                onChange={(e) => setRenameTitleInput(e.target.value)}
+                placeholder="e.g., Line Supervisor"
+                className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
+              />
+            </div>
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setIsRenameModalOpen(false)}
+                className="flex-1 py-2 text-xs font-semibold rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50 transition cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={isRenaming || !renameTitleInput.trim()}
+                className="flex-1 py-2 text-xs font-bold rounded-xl text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 transition shadow-xs cursor-pointer"
+              >
+                {isRenaming ? 'Saving...' : 'Save'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Save Changes Before Testing Modal */}
+      {testUnsavedRoleId && (
+        <div
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setTestUnsavedRoleId(null);
+          }}
+          className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4"
+        >
+          <div className="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95 duration-150 space-y-3.5">
+            <div className="flex items-start justify-between">
+              <div className="w-10 h-10 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center shrink-0 text-base">
+                👁
+              </div>
+              <button
+                type="button"
+                onClick={() => setTestUnsavedRoleId(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div>
+              <h3 className="text-base font-bold text-slate-900">
+                Save changes before testing?
+              </h3>
+              <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                {getRoleDisplayName(
+                  allRoles.find((r) => r.id === testUnsavedRoleId),
+                  testUnsavedRoleId
+                )}{' '}
+                has unsaved permission changes. Save them before starting the role preview, or test using currently saved permissions?
+              </p>
+            </div>
+            <div className="flex flex-col gap-2 pt-1">
+              <button
+                type="button"
+                disabled={isSaving}
+                onClick={handleSaveAndTestRole}
+                className="w-full py-2.5 text-xs font-bold rounded-xl text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 transition shadow-xs cursor-pointer"
+              >
+                {isSaving ? 'Saving...' : 'Save & test'}
+              </button>
+              <button
+                type="button"
+                disabled={isSaving}
+                onClick={handleTestWithoutSavingRole}
+                className="w-full py-2 text-xs font-semibold rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-200 transition cursor-pointer"
+              >
+                Test without saving
+              </button>
+              <button
+                type="button"
+                disabled={isSaving}
+                onClick={() => setTestUnsavedRoleId(null)}
+                className="w-full py-2 text-xs font-semibold rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50 transition cursor-pointer"
+              >
+                Cancel
+              </button>
+            </div>
           </div>
         </div>
       )}

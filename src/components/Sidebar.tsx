@@ -1,20 +1,20 @@
 import React from 'react';
 import {
   Boxes,
-  CookingPot,
+  ClipboardList,
   Sparkles,
   BarChart3,
   History,
   Users,
   AlertTriangle,
   X,
-  Smartphone,
   Shield,
   Layers,
   ClipboardCheck,
   LogOut,
   ShoppingCart,
   ShoppingBag,
+  Smartphone,
 } from 'lucide-react';
 import { useInventory } from '../context/InventoryContext';
 import { useAuth } from '../context/AuthContext';
@@ -26,8 +26,7 @@ interface SidebarProps {
   onSelectTab: (tab: ActiveTab) => void;
   isOpenMobile: boolean;
   onCloseMobile: () => void;
-  onOpenShareModal: () => void;
-  onOpenInstallModal?: () => void;
+  onOpenShareModal?: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -36,11 +35,21 @@ export const Sidebar: React.FC<SidebarProps> = ({
   isOpenMobile,
   onCloseMobile,
   onOpenShareModal,
-  onOpenInstallModal,
 }) => {
-  const { items, recipes, isLiveConnected, syncEventCount, pendingAuditCount } = useInventory();
+  const { items, recipes, pendingAuditCount } = useInventory();
   const { openSalesCount, openPurchaseCount } = useTrade();
-  const { currentUser, role, realUserName, permissions, signOut } = useAuth();
+  const { currentUser, role, allRoles, realUserName, permissions, signOut } = useAuth();
+
+  const roleLabel =
+    role === 'admin'
+      ? 'Owner'
+      : role === 'manager'
+      ? 'Manager'
+      : role === 'staff'
+      ? 'Staff'
+      : role === 'viewer'
+      ? 'Viewer'
+      : allRoles.find((r) => r.id === role)?.title || role;
 
   const lowStockCount = items.filter((i) => i.quantity <= i.minStock).length;
 
@@ -64,15 +73,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
       badge: items.length,
       alert: lowStockCount > 0,
       alertCount: lowStockCount,
-      alertTitle: `${lowStockCount} items below minimum stock threshold`,
+      alertTitle: `${lowStockCount} low stock`,
       color: 'text-indigo-600',
       visible: true,
     },
     {
       id: 'recipes',
-      label: 'Recipes & BOM',
-      description: 'Formulas & material usage',
-      icon: CookingPot,
+      label: 'Product BOM',
+      description: 'BOMs & material usage',
+      icon: ClipboardList,
       badge: recipes.length,
       color: 'text-amber-600',
       visible: permissions.canEditRecipes,
@@ -131,17 +140,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
       color: 'text-purple-600',
       visible: permissions.canViewStockMovementsOption,
     },
-    {
-      id: 'team',
-      label: 'Roles & Access Control',
-      description: 'Role capabilities & permissions',
-      icon: Shield,
-      color: 'text-indigo-600',
-      visible: permissions.canViewRolesAccessOption,
-    },
   ];
 
   const navItems = allNavItems.filter((item) => item.visible !== false);
+  const showSettingsSection = permissions.canViewRolesAccessOption || Boolean(onOpenShareModal);
 
   const handleNavClick = (tabId: ActiveTab) => {
     onSelectTab(tabId);
@@ -154,50 +156,56 @@ export const Sidebar: React.FC<SidebarProps> = ({
       {isOpenMobile && (
         <div
           onClick={onCloseMobile}
-          className="fixed inset-0 z-40 bg-slate-900/50 backdrop-blur-xs lg:hidden transition-opacity"
+          onTouchMove={(e) => e.preventDefault()}
+          className="fixed inset-0 z-40 bg-slate-900/50 backdrop-blur-xs lg:hidden transition-opacity touch-none"
         />
       )}
 
       {/* Side Shelf Container - Fully scrollable up and down */}
       <aside
-        className={`fixed lg:sticky top-0 left-0 z-50 h-screen max-h-screen w-72 bg-white border-r border-slate-200 flex flex-col transition-transform duration-200 ease-in-out shrink-0 ${
+        className={`fixed lg:sticky top-0 left-0 z-50 h-[100dvh] max-h-[100dvh] overscroll-contain w-72 bg-white border-r border-slate-200 flex flex-col transition-transform duration-200 ease-in-out shrink-0 ${
           isOpenMobile ? 'translate-x-0 shadow-2xl' : '-translate-x-full lg:translate-x-0'
         }`}
       >
         {/* Top Brand Header (Sticky at top of side shelf) */}
-        <div className="h-16 px-5 border-b border-slate-100 flex items-center justify-between shrink-0 bg-white">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-slate-50 border border-slate-200/80 p-1 flex items-center justify-center shadow-xs shrink-0 overflow-hidden">
-              <img
-                src="/pti-logo.png"
-                alt="Power Track Logo"
-                className="w-full h-full object-contain"
-              />
+        <div
+          className="border-b border-slate-100 shrink-0 bg-white"
+          style={{ paddingTop: 'env(safe-area-inset-top)' }}
+        >
+          <div className="h-14 lg:h-16 px-4 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-slate-50 border border-slate-200/80 p-1 flex items-center justify-center shadow-xs shrink-0 overflow-hidden">
+                <img
+                  src="/pti-logo.png"
+                  alt="Power Track Logo"
+                  className="w-full h-full object-contain"
+                />
+              </div>
+              <div className="flex flex-col min-w-0">
+                <span className="font-extrabold text-base text-slate-900 tracking-tight leading-tight">Power Track</span>
+                <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">PTI Inventory</span>
+              </div>
             </div>
-            <div className="flex flex-col min-w-0">
-              <span className="font-extrabold text-base text-slate-900 tracking-tight leading-tight">Power Track</span>
-              <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">PTI Inventory</span>
-            </div>
-          </div>
 
-          {/* Mobile Close Button */}
-          <button
-            onClick={onCloseMobile}
-            className="lg:hidden p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition"
-          >
-            <X className="w-5 h-5" />
-          </button>
+            {/* Mobile Close Button */}
+            <button
+              onClick={onCloseMobile}
+              className="lg:hidden p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
         {/* Scrollable Area - Can move up and down freely */}
-        <div className="flex-1 overflow-y-auto overscroll-contain p-3 space-y-4">
+        <div className="flex-1 overflow-y-auto overscroll-contain px-2.5 py-2 space-y-2.5">
           {/* Navigation Section */}
           <div>
-            <div className="px-3 pb-2 pt-1 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+            <div className="px-3 pb-1 pt-0.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
               Operations & Catalog
             </div>
 
-            <nav className="space-y-1">
+            <nav className="space-y-0.5">
               {navItems.map((item) => {
                 const Icon = item.icon;
                 const isActive = activeTab === item.id;
@@ -206,22 +214,22 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   <button
                     key={item.id}
                     onClick={() => handleNavClick(item.id)}
-                    className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-left text-xs transition group cursor-pointer ${
+                    className={`w-full flex items-center justify-between px-3 py-1.5 rounded-xl text-left text-xs transition group cursor-pointer ${
                       isActive
                         ? 'bg-slate-900 text-white font-semibold shadow-xs'
                         : 'text-slate-700 hover:bg-slate-100 hover:text-slate-900'
                     }`}
                   >
-                    <div className="flex items-center gap-3 min-w-0">
+                    <div className="flex items-center gap-2.5 min-w-0">
                       <Icon
                         className={`w-4 h-4 shrink-0 transition ${
                           isActive ? 'text-white' : `${item.color} group-hover:scale-110`
                         }`}
                       />
                       <div className="min-w-0">
-                        <div className="truncate font-medium">{item.label}</div>
+                        <div className="truncate font-medium leading-tight">{item.label}</div>
                         <div
-                          className={`text-[10px] truncate font-normal ${
+                          className={`text-[9.5px] leading-tight truncate font-normal ${
                             isActive ? 'text-slate-300' : 'text-slate-400'
                           }`}
                         >
@@ -233,7 +241,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     <div className="flex items-center gap-1.5 shrink-0 ml-2">
                       {item.alert && item.alertCount !== undefined && item.alertCount > 0 && (
                         <span
-                          title={item.alertTitle || `${item.alertCount} items`}
+                          title={item.alertTitle || `${item.alertCount} low stock`}
+                          aria-label={item.alertTitle || `${item.alertCount} low stock`}
                           className="flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-rose-500 text-white animate-pulse"
                         >
                           <AlertTriangle className="w-3 h-3" />
@@ -243,7 +252,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
                       {item.badge !== undefined && (
                         <span
-                          className={`text-[11px] px-2 py-0.5 rounded-full font-bold ${
+                          className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold ${
                             isActive
                               ? 'bg-slate-800 text-slate-200'
                               : 'bg-slate-100 text-slate-600'
@@ -259,104 +268,104 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </nav>
           </div>
 
-          {/* Multi-Device Live Sync Card inside scrollable shelf */}
-          <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/80 shadow-2xs space-y-2.5">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className="relative flex h-2 w-2">
-                  {isLiveConnected && (
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-                  )}
-                  <span
-                    className={`relative inline-flex rounded-full h-2 w-2 ${
-                      isLiveConnected ? 'bg-emerald-500' : 'bg-amber-500'
-                    }`}
-                  />
-                </span>
-                <span className="text-xs font-bold text-slate-800">
-                  {isLiveConnected ? 'Live Cloud Sync' : 'Connecting...'}
-                </span>
+          {showSettingsSection && (
+            <div className="pt-1 border-t border-slate-100">
+              <div className="px-3 pb-1 pt-0.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                SETTINGS
               </div>
-              <span className="text-[10px] text-slate-500 font-mono">
-                {syncEventCount} updates
-              </span>
+
+              <nav className="space-y-0.5">
+                {permissions.canViewRolesAccessOption && (
+                  <button
+                    type="button"
+                    onClick={() => handleNavClick('team')}
+                    title="Configure user rights"
+                    className={`w-full flex items-center justify-between px-3 py-1.5 rounded-xl text-left text-xs transition group cursor-pointer ${
+                      activeTab === 'team'
+                        ? 'bg-slate-900 text-white font-semibold shadow-xs'
+                        : 'text-slate-700 hover:bg-slate-100 hover:text-slate-900'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <Shield
+                        className={`w-4 h-4 shrink-0 transition ${
+                          activeTab === 'team' ? 'text-white' : 'text-indigo-600 group-hover:scale-110'
+                        }`}
+                      />
+                      <div className="min-w-0">
+                        <div className="truncate font-medium leading-tight">Roles & Team</div>
+                        <div
+                          className={`text-[9.5px] leading-tight truncate font-normal ${
+                            activeTab === 'team' ? 'text-slate-300' : 'text-slate-400'
+                          }`}
+                        >
+                          Users and access
+                        </div>
+                      </div>
+                    </div>
+                  </button>
+                )}
+
+                {onOpenShareModal && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onCloseMobile();
+                      onOpenShareModal();
+                    }}
+                    className="w-full flex items-center justify-between px-3 py-1.5 rounded-xl text-left text-xs text-slate-700 hover:bg-slate-100 hover:text-slate-900 transition group cursor-pointer"
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <Smartphone className="w-4 h-4 shrink-0 text-emerald-600 group-hover:scale-110 transition" />
+                      <div className="min-w-0">
+                        <div className="truncate font-medium leading-tight">Connect devices</div>
+                        <div className="text-[9.5px] leading-tight truncate font-normal text-slate-400">
+                          Open on another phone
+                        </div>
+                      </div>
+                    </div>
+                  </button>
+                )}
+              </nav>
             </div>
-
-            <p className="text-[11px] text-slate-500 leading-snug">
-              Syncs in real-time across mobile, tablets & desktops.
-            </p>
-
-            <div className="space-y-1.5 pt-1">
-              <button
-                type="button"
-                onClick={() => {
-                  onOpenShareModal();
-                  onCloseMobile();
-                }}
-                className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 shadow-2xs transition cursor-pointer active:bg-slate-100"
-              >
-                <Smartphone className="w-3.5 h-3.5 text-slate-500" />
-                <span>Connect Other Devices</span>
-              </button>
-
-              {onOpenInstallModal && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    onOpenInstallModal();
-                    onCloseMobile();
-                  }}
-                  className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold text-indigo-700 bg-indigo-50/80 hover:bg-indigo-100 border border-indigo-200/80 shadow-2xs transition cursor-pointer active:scale-98"
-                >
-                  <Smartphone className="w-3.5 h-3.5 text-indigo-600" />
-                  <span>Install App on Phone</span>
-                </button>
-              )}
-            </div>
-          </div>
+          )}
         </div>
 
-        {/* Bottom Section: Signed-in User Profile & Sign Out Button */}
-        <div className="p-3 border-t border-slate-200 shrink-0 bg-slate-50 space-y-2">
-          <div className="p-2.5 rounded-xl bg-white border border-slate-200 text-xs shadow-2xs">
-            <div className="flex items-start justify-between gap-2">
-              <div className="flex items-center gap-2 min-w-0">
-                <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-indigo-600 to-sky-500 text-white font-bold flex items-center justify-center shrink-0 text-xs shadow-2xs">
-                  {(realUserName.charAt(0) || 'U').toUpperCase()}
-                </div>
-                <div className="min-w-0">
-                  <div className="font-bold text-slate-900 truncate text-xs">
-                    {realUserName}
-                  </div>
-                  <div className="text-[10px] text-slate-500 font-mono truncate">
-                    {currentUser?.email}
-                  </div>
-                </div>
-              </div>
-              <span className="px-2 py-0.5 rounded-full text-[9px] font-extrabold uppercase tracking-wide bg-indigo-50 text-indigo-700 border border-indigo-200 shrink-0">
-                {role}
-              </span>
+        {/* Bottom Slim User Row (~56px) */}
+        <div
+          className="border-t border-slate-200 shrink-0 bg-slate-50"
+          style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+        >
+          <div className="h-14 px-3 flex items-center justify-between gap-2.5">
+            <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-indigo-600 to-sky-500 text-white font-bold flex items-center justify-center shrink-0 text-xs shadow-2xs">
+              {(realUserName.charAt(0) || 'U').toUpperCase()}
             </div>
 
-            <div className="mt-2.5 pt-2 border-t border-slate-100 flex items-center justify-between gap-2">
-              <button
-                type="button"
-                onClick={() => handleNavClick('team')}
-                title="Configure user rights"
-                className="text-[11px] text-indigo-600 hover:text-indigo-800 font-semibold cursor-pointer"
-              >
-                Roles & Team
-              </button>
-              <button
-                type="button"
-                onClick={() => signOut()}
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-rose-600 hover:text-rose-700 hover:bg-rose-50 border border-rose-200/80 transition text-[11px] font-bold cursor-pointer"
-                title="Sign out of Power Track"
-              >
-                <LogOut className="w-3 h-3" />
-                <span>Sign Out</span>
-              </button>
+            <div className="min-w-0 flex-1" title={currentUser?.email || realUserName}>
+              <div className="font-bold text-slate-900 truncate text-xs leading-tight">
+                {realUserName}
+              </div>
+              <div className="flex items-center gap-1.5 mt-0.5 min-w-0">
+                <span className="px-1.5 py-0.5 rounded-full text-[9.5px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200 shrink-0 leading-none">
+                  {roleLabel}
+                </span>
+                {currentUser?.email && (
+                  <span className="hidden sm:inline text-[10px] text-slate-400 font-mono truncate">
+                    {currentUser.email}
+                  </span>
+                )}
+              </div>
             </div>
+
+            <button
+              type="button"
+              onClick={() => signOut()}
+              className="w-9 h-9 rounded-lg flex items-center justify-center text-rose-600 hover:text-rose-700 hover:bg-rose-50 transition shrink-0 cursor-pointer"
+              title="Sign out"
+              aria-label="Sign out"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
           </div>
         </div>
       </aside>

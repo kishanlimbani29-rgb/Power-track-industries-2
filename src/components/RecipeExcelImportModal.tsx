@@ -1,7 +1,7 @@
 import React, { useState, useRef } from 'react';
 import {
   X,
-  CookingPot,
+  ClipboardList,
   Upload,
   Download,
   CheckCircle2,
@@ -66,72 +66,72 @@ export const RecipeExcelImportModal: React.FC<RecipeExcelImportModalProps> = ({ 
   const handleDownloadTemplate = (format: 'xlsx' | 'csv') => {
     const sampleRows = [
       {
-        'Recipe Name': '12V 100Ah Deep Cycle Power Battery Assembly',
+        'BOM Name': '12V 100Ah Deep Cycle Power Battery Assembly',
         'Finished Product (Name or SKU)': '12V 100Ah Deep Cycle Power Battery',
         'Yield Quantity': 1,
         'Labor Cost (₹)': 18.5,
         'Instructions': 'Assemble cured positive and negative plate groups, fit separator envelopes, weld internal strap connections, cast case terminals, and seal with epoxy casing lid.',
-        'Ingredient (Name or SKU)': 'Positive Lead Plate 12V Sub-Assembly',
-        'Ingredient Quantity': 6,
-        'Ingredient Unit': 'pcs',
+        'Material (Name or SKU)': 'Positive Lead Plate 12V Sub-Assembly',
+        'Material Quantity': 6,
+        'Material Unit': 'pcs',
       },
       {
-        'Recipe Name': '12V 100Ah Deep Cycle Power Battery Assembly',
+        'BOM Name': '12V 100Ah Deep Cycle Power Battery Assembly',
         'Finished Product (Name or SKU)': '12V 100Ah Deep Cycle Power Battery',
         'Yield Quantity': 1,
         'Labor Cost (₹)': 18.5,
         'Instructions': 'Assemble cured positive and negative plate groups, fit separator envelopes, weld internal strap connections, cast case terminals, and seal with epoxy casing lid.',
-        'Ingredient (Name or SKU)': 'Refined Lead Ingot 99.97%',
-        'Ingredient Quantity': 14.5,
-        'Ingredient Unit': 'kg',
+        'Material (Name or SKU)': 'Refined Lead Ingot 99.97%',
+        'Material Quantity': 14.5,
+        'Material Unit': 'kg',
       },
       {
-        'Recipe Name': '12V 100Ah Deep Cycle Power Battery Assembly',
+        'BOM Name': '12V 100Ah Deep Cycle Power Battery Assembly',
         'Finished Product (Name or SKU)': '12V 100Ah Deep Cycle Power Battery',
         'Yield Quantity': 1,
         'Labor Cost (₹)': 18.5,
         'Instructions': 'Assemble cured positive and negative plate groups, fit separator envelopes, weld internal strap connections, cast case terminals, and seal with epoxy casing lid.',
-        'Ingredient (Name or SKU)': 'Lead Oxide Powder (Grey Oxide)',
-        'Ingredient Quantity': 5.2,
-        'Ingredient Unit': 'kg',
+        'Material (Name or SKU)': 'Lead Oxide Powder (Grey Oxide)',
+        'Material Quantity': 5.2,
+        'Material Unit': 'kg',
       },
       {
-        'Recipe Name': '12V 100Ah Deep Cycle Power Battery Assembly',
+        'BOM Name': '12V 100Ah Deep Cycle Power Battery Assembly',
         'Finished Product (Name or SKU)': '12V 100Ah Deep Cycle Power Battery',
         'Yield Quantity': 1,
         'Labor Cost (₹)': 18.5,
         'Instructions': 'Assemble cured positive and negative plate groups, fit separator envelopes, weld internal strap connections, cast case terminals, and seal with epoxy casing lid.',
-        'Ingredient (Name or SKU)': 'Dual Terminal Brass Connector',
-        'Ingredient Quantity': 2,
-        'Ingredient Unit': 'pcs',
+        'Material (Name or SKU)': 'Dual Terminal Brass Connector',
+        'Material Quantity': 2,
+        'Material Unit': 'pcs',
       },
       {
-        'Recipe Name': 'Positive Lead Plate 12V Sub-Assembly (10x Batch)',
+        'BOM Name': 'Positive Lead Plate 12V Sub-Assembly (10x Batch)',
         'Finished Product (Name or SKU)': 'Positive Lead Plate 12V Sub-Assembly',
         'Yield Quantity': 10,
         'Labor Cost (₹)': 6.0,
         'Instructions': 'Cast gravity lead grids from bullion ingot, apply active paste mixture with grey lead oxide powder, flash-dry and transfer to humidity curing chambers for 48 hours.',
-        'Ingredient (Name or SKU)': 'Refined Lead Ingot 99.97%',
-        'Ingredient Quantity': 5,
-        'Ingredient Unit': 'kg',
+        'Material (Name or SKU)': 'Refined Lead Ingot 99.97%',
+        'Material Quantity': 5,
+        'Material Unit': 'kg',
       },
       {
-        'Recipe Name': 'Positive Lead Plate 12V Sub-Assembly (10x Batch)',
+        'BOM Name': 'Positive Lead Plate 12V Sub-Assembly (10x Batch)',
         'Finished Product (Name or SKU)': 'Positive Lead Plate 12V Sub-Assembly',
         'Yield Quantity': 10,
         'Labor Cost (₹)': 6.0,
         'Instructions': 'Cast gravity lead grids from bullion ingot, apply active paste mixture with grey lead oxide powder, flash-dry and transfer to humidity curing chambers for 48 hours.',
-        'Ingredient (Name or SKU)': 'Lead Oxide Powder (Grey Oxide)',
-        'Ingredient Quantity': 3.5,
-        'Ingredient Unit': 'kg',
+        'Material (Name or SKU)': 'Lead Oxide Powder (Grey Oxide)',
+        'Material Quantity': 3.5,
+        'Material Unit': 'kg',
       },
     ];
 
     if (format === 'xlsx') {
-      downloadExcelFile(sampleRows, 'power_track_recipe_bom_template.xlsx', 'Recipe BOM Template');
+      downloadExcelFile(sampleRows, 'power_track_product_bom_template.xlsx', 'Product BOM Template');
     } else {
       const csvLines = [
-        'Recipe Name,Finished Product (Name or SKU),Yield Quantity,Labor Cost (₹),Instructions,Ingredient (Name or SKU),Ingredient Quantity,Ingredient Unit',
+        'BOM Name,Finished Product (Name or SKU),Yield Quantity,Labor Cost (₹),Instructions,Material (Name or SKU),Material Quantity,Material Unit',
         '12V 100Ah Deep Cycle Power Battery Assembly,12V 100Ah Deep Cycle Power Battery,1,18.5,"Assemble cured positive and negative plate groups, fit separator envelopes, weld internal strap connections, cast case terminals, and seal with epoxy casing lid.",Positive Lead Plate 12V Sub-Assembly,6,pcs',
         '12V 100Ah Deep Cycle Power Battery Assembly,12V 100Ah Deep Cycle Power Battery,1,18.5,"Assemble cured positive and negative plate groups, fit separator envelopes, weld internal strap connections, cast case terminals, and seal with epoxy casing lid.",Refined Lead Ingot 99.97%,14.5,kg',
         '12V 100Ah Deep Cycle Power Battery Assembly,12V 100Ah Deep Cycle Power Battery,1,18.5,"Assemble cured positive and negative plate groups, fit separator envelopes, weld internal strap connections, cast case terminals, and seal with epoxy casing lid.",Lead Oxide Powder (Grey Oxide),5.2,kg',
@@ -139,7 +139,7 @@ export const RecipeExcelImportModal: React.FC<RecipeExcelImportModalProps> = ({ 
         'Positive Lead Plate 12V Sub-Assembly (10x Batch),Positive Lead Plate 12V Sub-Assembly,10,6,"Cast gravity lead grids from bullion ingot, apply active paste mixture with grey lead oxide powder, flash-dry and transfer to humidity curing chambers for 48 hours.",Refined Lead Ingot 99.97%,5,kg',
         'Positive Lead Plate 12V Sub-Assembly (10x Batch),Positive Lead Plate 12V Sub-Assembly,10,6,"Cast gravity lead grids from bullion ingot, apply active paste mixture with grey lead oxide powder, flash-dry and transfer to humidity curing chambers for 48 hours.",Lead Oxide Powder (Grey Oxide),3.5,kg',
       ].join('\n');
-      downloadCSVFile(csvLines, 'power_track_recipe_bom_template.csv');
+      downloadCSVFile(csvLines, 'power_track_product_bom_template.csv');
     }
   };
 
@@ -185,10 +185,10 @@ export const RecipeExcelImportModal: React.FC<RecipeExcelImportModalProps> = ({ 
       const rawRows: Record<string, any>[] = XLSX.utils.sheet_to_json(worksheet, { defval: '' });
 
       if (!rawRows || rawRows.length === 0) {
-        throw new Error('The uploaded sheet is empty. Please add recipe BOM rows.');
+        throw new Error('The uploaded sheet is empty. Please add BOM rows.');
       }
 
-      // Group rows by Recipe Name
+      // Group rows by BOM Name
       const recipeMap = new Map<string, {
         name: string;
         finishedProduct: string;
@@ -209,11 +209,12 @@ export const RecipeExcelImportModal: React.FC<RecipeExcelImportModalProps> = ({ 
         });
 
         const recipeName = String(
+          normalizedRow['bomname'] ||
           normalizedRow['recipename'] ||
           normalizedRow['name'] ||
+          normalizedRow['bom'] ||
           normalizedRow['recipe'] ||
-          normalizedRow['bomname'] ||
-          `Recipe ${idx + 1}`
+          `BOM ${idx + 1}`
         ).trim();
 
         const finishedProduct = String(
@@ -250,8 +251,11 @@ export const RecipeExcelImportModal: React.FC<RecipeExcelImportModalProps> = ({ 
           ''
         ).trim();
 
-        // Ingredient columns
+        // Material columns
         const ingredientQuery = String(
+          normalizedRow['materialnameorsku'] ||
+          normalizedRow['material'] ||
+          normalizedRow['materialname'] ||
           normalizedRow['ingredientnameorsku'] ||
           normalizedRow['ingredient'] ||
           normalizedRow['ingredientname'] ||
@@ -261,6 +265,7 @@ export const RecipeExcelImportModal: React.FC<RecipeExcelImportModalProps> = ({ 
         ).trim();
 
         const ingredientQuantity = parseNumeric(
+          normalizedRow['materialquantity'] ||
           normalizedRow['ingredientquantity'] ||
           normalizedRow['quantity'] ||
           normalizedRow['qty'] ||
@@ -269,14 +274,17 @@ export const RecipeExcelImportModal: React.FC<RecipeExcelImportModalProps> = ({ 
         );
 
         const ingredientUnit = String(
+          normalizedRow['materialunit'] ||
           normalizedRow['ingredientunit'] ||
           normalizedRow['unit'] ||
           normalizedRow['uom'] ||
           'kg'
         ).trim() || 'kg';
 
-        // Check if there's a multi-ingredient string column (e.g., "Lead: 5kg; Oxide: 2kg")
-        const allIngredientsStr = String(normalizedRow['ingredients'] || '').trim();
+        // Check if there's a multi-material string column (e.g., "Lead: 5kg; Oxide: 2kg")
+        const allIngredientsStr = String(
+          normalizedRow['materials'] || normalizedRow['ingredients'] || ''
+        ).trim();
 
         if (!recipeMap.has(recipeName)) {
           recipeMap.set(recipeName, {
@@ -339,7 +347,7 @@ export const RecipeExcelImportModal: React.FC<RecipeExcelImportModalProps> = ({ 
         });
 
         const isValid = Boolean(r.name && r.finishedProduct);
-        const error = !r.name ? 'Missing Recipe Name' : !r.finishedProduct ? 'Missing Finished Product' : undefined;
+        const error = !r.name ? 'Missing BOM Name' : !r.finishedProduct ? 'Missing Finished Product' : undefined;
 
         return {
           name: r.name,
@@ -356,7 +364,7 @@ export const RecipeExcelImportModal: React.FC<RecipeExcelImportModalProps> = ({ 
 
       setParsedRecipes(finalRecipes);
       const validCount = finalRecipes.filter((r) => r.isValid).length;
-      setStatusMessage(`Found ${finalRecipes.length} recipes with ${finalRecipes.reduce((acc, r) => acc + r.ingredients.length, 0)} total ingredients (${validCount} ready to import)`);
+      setStatusMessage(`Found ${finalRecipes.length} BOMs with ${finalRecipes.reduce((acc, r) => acc + r.ingredients.length, 0)} total materials (${validCount} ready to import)`);
     } catch (err: any) {
       setErrorMessage(err.message || 'Failed to parse Excel file. Please verify file format.');
       setParsedRecipes([]);
@@ -368,7 +376,7 @@ export const RecipeExcelImportModal: React.FC<RecipeExcelImportModalProps> = ({ 
   const handleExecuteImport = async () => {
     const validRecipes = parsedRecipes.filter((r) => r.isValid);
     if (validRecipes.length === 0) {
-      setErrorMessage('No valid recipes to import.');
+      setErrorMessage('No valid BOMs to import.');
       return;
     }
 
@@ -417,7 +425,7 @@ export const RecipeExcelImportModal: React.FC<RecipeExcelImportModalProps> = ({ 
             sellingPrice: 0,
             supplier: 'In-House Manufacturing',
             location: 'Finished Goods',
-            notes: `Auto-created from recipe ${rec.name}`,
+            notes: `Auto-created from BOM ${rec.name}`,
           });
           finishedId = newFinId;
           finishedName = rec.finishedProductQuery;
@@ -458,7 +466,7 @@ export const RecipeExcelImportModal: React.FC<RecipeExcelImportModalProps> = ({ 
               sellingPrice: 0,
               supplier: 'General Supply',
               location: 'Raw Materials Storage',
-              notes: `Auto-created from recipe ingredient ${ing.rawItemQuery}`,
+              notes: `Auto-created from BOM material ${ing.rawItemQuery}`,
             });
             rawId = newRawId;
             rawName = ing.rawItemQuery;
@@ -488,13 +496,13 @@ export const RecipeExcelImportModal: React.FC<RecipeExcelImportModalProps> = ({ 
         setImportProgress({ current: i + 1, total: validRecipes.length });
       }
 
-      setStatusMessage(`Successfully imported all ${validRecipes.length} recipes & BOMs!`);
+      setStatusMessage(`Successfully imported all ${validRecipes.length} BOMs!`);
       setTimeout(() => {
         resetState();
         onClose();
       }, 1500);
     } catch (err: any) {
-      setErrorMessage(err.message || 'Error occurred while saving recipes.');
+      setErrorMessage(err.message || 'Error occurred while saving BOMs.');
     } finally {
       setIsImporting(false);
     }
@@ -507,11 +515,11 @@ export const RecipeExcelImportModal: React.FC<RecipeExcelImportModalProps> = ({ 
         <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-purple-50 text-purple-600 border border-purple-200/60 flex items-center justify-center shrink-0">
-              <CookingPot className="w-5 h-5" />
+              <ClipboardList className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-slate-900">Import Recipes & BOM from Excel / CSV</h2>
-              <p className="text-xs text-slate-500">Bulk import assembly formulas, yields, and ingredient lists</p>
+              <h2 className="text-base font-bold text-slate-900">Import Product BOMs from Excel / CSV</h2>
+              <p className="text-xs text-slate-500">Bulk import assembly BOMs, yields, and material lists</p>
             </div>
           </div>
           <button
@@ -531,10 +539,10 @@ export const RecipeExcelImportModal: React.FC<RecipeExcelImportModalProps> = ({ 
           <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
             <div>
               <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
-                Step 1: Download Pre-Formatted Recipe Template
+                Step 1: Download Pre-Formatted BOM Template
               </span>
               <p className="text-xs text-slate-700 mt-0.5 font-medium">
-                Standard ERP format with Recipe Name, Finished Product, Yield, and Ingredient rows.
+                Standard ERP format with BOM Name, Finished Product, Yield, and Material rows.
               </p>
             </div>
 
@@ -562,7 +570,7 @@ export const RecipeExcelImportModal: React.FC<RecipeExcelImportModalProps> = ({ 
           {/* Step 2: Upload Completed File */}
           <div className="space-y-2">
             <label className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
-              Step 2: Upload Your Filled Recipe Spreadsheet
+              Step 2: Upload Your Filled BOM Spreadsheet
             </label>
 
             <div
@@ -583,7 +591,7 @@ export const RecipeExcelImportModal: React.FC<RecipeExcelImportModalProps> = ({ 
                 {fileName ? (
                   <span className="text-purple-600 font-bold">{fileName}</span>
                 ) : (
-                  'Click to upload or drag & drop Recipe Excel / CSV file'
+                  'Click to upload or drag & drop BOM Excel / CSV file'
                 )}
               </div>
               <p className="text-[11px] text-slate-400">Supports .xlsx, .xls, and .csv files</p>
@@ -610,7 +618,7 @@ export const RecipeExcelImportModal: React.FC<RecipeExcelImportModalProps> = ({ 
             <div className="space-y-3 pt-1">
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-bold text-slate-700 uppercase tracking-wider">
-                  Spreadsheet Preview ({parsedRecipes.length} Recipes)
+                  Spreadsheet Preview ({parsedRecipes.length} BOMs)
                 </span>
                 <span className="text-[11px] text-slate-500">
                   {parsedRecipes.filter((r) => r.isValid).length} Valid
@@ -663,13 +671,13 @@ export const RecipeExcelImportModal: React.FC<RecipeExcelImportModalProps> = ({ 
                       </div>
                     </div>
 
-                    {/* Ingredients summary */}
+                    {/* Materials summary */}
                     {rec.ingredients.length > 0 && (
                       <div className="bg-slate-50 rounded-lg p-2.5 border border-slate-200/80 text-[11px] text-slate-600 space-y-1.5">
                         <div className="font-semibold text-slate-700 flex items-center justify-between">
                           <span className="flex items-center gap-1">
                             <Layers className="w-3 h-3 text-purple-600" />
-                            <span>{rec.ingredients.length} Ingredients Required:</span>
+                            <span>{rec.ingredients.length} Materials Required:</span>
                           </span>
                         </div>
                         <div className="divide-y divide-slate-200/60">
@@ -710,7 +718,7 @@ export const RecipeExcelImportModal: React.FC<RecipeExcelImportModalProps> = ({ 
               <div className="flex items-center justify-between text-xs font-semibold text-purple-900">
                 <span className="flex items-center gap-2">
                   <Loader2 className="w-4 h-4 animate-spin text-purple-600" />
-                  Saving recipes to database...
+                  Saving BOMs to database...
                 </span>
                 <span>
                   {importProgress.current} / {importProgress.total}
@@ -733,7 +741,7 @@ export const RecipeExcelImportModal: React.FC<RecipeExcelImportModalProps> = ({ 
           <div className="text-xs text-slate-500">
             {parsedRecipes.length > 0 && (
               <span>
-                {parsedRecipes.filter((r) => r.isValid).length} recipes will be saved to your system.
+                {parsedRecipes.filter((r) => r.isValid).length} BOMs will be saved to your system.
               </span>
             )}
           </div>
@@ -766,7 +774,7 @@ export const RecipeExcelImportModal: React.FC<RecipeExcelImportModalProps> = ({ 
                 ) : (
                   <>
                     <Sparkles className="w-3.5 h-3.5" />
-                    <span>Import {parsedRecipes.filter((r) => r.isValid).length} Recipes</span>
+                    <span>Import {parsedRecipes.filter((r) => r.isValid).length} BOMs</span>
                   </>
                 )}
               </button>

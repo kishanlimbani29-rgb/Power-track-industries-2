@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { X, Copy, Check, Smartphone, ShieldCheck, Share2, MessageCircle } from 'lucide-react';
 import { useInventory } from '../context/InventoryContext';
+import { formatTime12h } from '../utils/numberFormat';
 
 interface DeviceShareModalProps {
   isOpen: boolean;
@@ -67,8 +68,8 @@ export const DeviceShareModal: React.FC<DeviceShareModalProps> = ({ isOpen, onCl
   const handleShare = async () => {
     try {
       await navigator.share({
-        title: 'Power Track - Real-Time Inventory',
-        text: 'Open Power Track Multi-Device Inventory on this device:',
+        title: 'Power Track – Battery Inventory & Production',
+        text: 'Open Power Track – Battery Inventory & Production on this device:',
         url: appUrl,
       });
     } catch {
@@ -77,7 +78,7 @@ export const DeviceShareModal: React.FC<DeviceShareModalProps> = ({ isOpen, onCl
   };
 
   const whatsappShareUrl = `https://api.whatsapp.com/send?text=${encodeURIComponent(
-    `Open Power Track Real-Time Inventory on your mobile or tablet: ${appUrl}`
+    `Open Power Track – Battery Inventory & Production on your mobile or tablet: ${appUrl}`
   )}`;
 
   const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(
@@ -137,7 +138,7 @@ export const DeviceShareModal: React.FC<DeviceShareModalProps> = ({ isOpen, onCl
               <div>
                 <div className="text-xs font-bold text-emerald-900">Firestore Cloud Sync: Live</div>
                 <div className="text-[10px] text-emerald-700">
-                  Last update: {lastSyncTime ? lastSyncTime.toLocaleTimeString() : 'Just now'} ({syncEventCount} updates)
+                  Last update: {lastSyncTime ? formatTime12h(lastSyncTime) : 'Just now'} ({syncEventCount} updates)
                 </div>
               </div>
             </div>

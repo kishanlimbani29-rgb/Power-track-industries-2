@@ -2,9 +2,120 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Power Track - Real-Time Inventory & Recipe Management</title>
-    <meta name="description" content="Multi-device real-time stock and inventory management with role-based access control, recipe-based raw material consumption, and comprehensive business analytics." />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <script>
+      (function () {
+        // Intercept Vite HMR WebSocket in AI Studio preview iframe where WebSocket upgrade is not supported
+        try {
+          var NativeWS = window.WebSocket;
+          if (NativeWS) {
+            window.WebSocket = function (url, protocols) {
+              var ws = new NativeWS(url, protocols);
+              var origAddEventListener = ws.addEventListener;
+              ws.addEventListener = function (type, listener, options) {
+                if (type === 'close' || type === 'error') {
+                  var wrappedListener = function (event) {
+                    try {
+                      return listener.apply(this, arguments);
+                    } catch (err) {
+                      if (err && String(err.message || err).includes('WebSocket closed without opened')) {
+                        return;
+                      }
+                      throw err;
+                    }
+                  };
+                  return origAddEventListener.call(this, type, wrappedListener, options);
+                }
+                return origAddEventListener.call(this, type, listener, options);
+              };
+
+              var origOnClose = null;
+              Object.defineProperty(ws, 'onclose', {
+                get: function () {
+                  return origOnClose;
+                },
+                set: function (fn) {
+                  if (typeof fn === 'function') {
+                    origOnClose = function () {
+                      try {
+                        return fn.apply(this, arguments);
+                      } catch (err) {
+                        if (err && String(err.message || err).includes('WebSocket closed without opened')) {
+                          return;
+                        }
+                        throw err;
+                      }
+                    };
+                  } else {
+                    origOnClose = fn;
+                  }
+                },
+              });
+
+              return ws;
+            };
+            window.WebSocket.prototype = NativeWS.prototype;
+            window.WebSocket.CONNECTING = NativeWS.CONNECTING;
+            window.WebSocket.OPEN = NativeWS.OPEN;
+            window.WebSocket.CLOSING = NativeWS.CLOSING;
+            window.WebSocket.CLOSED = NativeWS.CLOSED;
+          }
+        } catch (_) {}
+
+        var isHmrError = function (val) {
+          if (!val) return false;
+          var str = String(val.message || val.stack || val || '');
+          return str.includes('WebSocket closed without opened') || str.includes('vite-hmr');
+        };
+
+        var origError = console.error;
+        console.error = function () {
+          for (var i = 0; i < arguments.length; i++) {
+            if (isHmrError(arguments[i])) return;
+          }
+          return origError.apply(console, arguments);
+        };
+
+        var origWarn = console.warn;
+        console.warn = function () {
+          for (var i = 0; i < arguments.length; i++) {
+            if (isHmrError(arguments[i])) return;
+          }
+          return origWarn.apply(console, arguments);
+        };
+
+        window.onerror = function (msg, url, lineNo, columnNo, error) {
+          if (isHmrError(msg) || isHmrError(error)) {
+            return true;
+          }
+        };
+
+        window.addEventListener(
+          'unhandledrejection',
+          function (e) {
+            if (isHmrError(e.reason)) {
+              e.preventDefault();
+              e.stopImmediatePropagation();
+            }
+          },
+          true
+        );
+
+        window.addEventListener(
+          'error',
+          function (e) {
+            if (isHmrError(e.message) || isHmrError(e.error)) {
+              e.preventDefault();
+              e.stopImmediatePropagation();
+              return true;
+            }
+          },
+          true
+        );
+      })();
+    </script>
+    <title>Power Track – Battery Inventory & Production</title>
+    <meta name="description" content="Multi-device real-time battery stock, BOM material consumption, and production batch management for Power Track Industries (brand Welten)." />
     <meta name="theme-color" content="#0f172a" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -16,8 +127,8 @@
     <link rel="icon" type="image/png" sizes="192x192" href="/pwa-192x192.png?v=2" />
     <link rel="icon" type="image/png" sizes="512x512" href="/pwa-512x512.png?v=2" />
     <link rel="manifest" href="/manifest.json?v=2" />
-    <meta property="og:title" content="Power Track - Real-Time Inventory & Recipe Management" />
-    <meta property="og:description" content="Multi-device real-time stock and inventory management with role-based access control, recipe-based raw material consumption, and comprehensive business analytics." />
+    <meta property="og:title" content="Power Track – Battery Inventory & Production" />
+    <meta property="og:description" content="Multi-device real-time battery stock, BOM material consumption, and production batch management for Power Track Industries (brand Welten)." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
   </head>

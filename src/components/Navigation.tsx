@@ -1,7 +1,7 @@
 import React from 'react';
 import {
   Boxes,
-  CookingPot,
+  ClipboardList,
   Sparkles,
   BarChart3,
   History,
@@ -50,8 +50,8 @@ export const Navigation: React.FC<NavigationProps> = ({ activeTab, onSelectTab }
     },
     {
       id: 'recipes',
-      label: 'Recipes & BOM',
-      icon: CookingPot,
+      label: 'Product BOM',
+      icon: ClipboardList,
       badge: recipes.length,
       visible: permissions.canEditRecipes,
     },

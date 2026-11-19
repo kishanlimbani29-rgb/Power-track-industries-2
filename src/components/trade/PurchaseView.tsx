@@ -3,7 +3,6 @@ import {
   ShoppingBag,
   Plus,
   Search,
-  BarChart3,
   Wallet,
   Undo2,
   Truck,
@@ -14,6 +13,8 @@ import {
   AlertTriangle,
   PackageCheck,
   Pencil,
+  ChevronRight,
+  X,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useInventory } from '../../context/InventoryContext';
@@ -23,6 +24,7 @@ import { getItemQuantity } from '../../utils/itemResolver';
 import { calcLine, formatINR, formatINRShort, GST_RATES, moneyPosition, round2, sumLines, todayISODate, weightedAverageCost } from '../../utils/tradeMath';
 import { purchaseOrderPdf, purchaseReturnPdf } from '../../utils/tradeDocuments';
 import { downloadExcelFile } from '../../utils/fileDownload';
+import { formatShortDate } from '../../utils/numberFormat';
 import {
   Chip,
   ConfirmDialog,
@@ -38,7 +40,6 @@ import {
   PrimaryButton,
   Sheet,
   SmallButton,
-  StatCard,
   Totals,
   Tone,
   useToast,
@@ -58,29 +59,71 @@ const PAY: Record<string, { label: string; tone: Tone }> = {
   paid: { label: 'Paid', tone: 'emerald' },
   refund_due: { label: 'Refund due', tone: 'amber' },
 };
-type Filter = 'all' | 'open' | 'unpaid' | 'received' | 'cancelled' | 'returns';
+type PurchaseTab = 'orders' | 'suppliers';
+type Filter = 'all' | 'open' | 'late' | 'unpaid' | 'received' | 'cancelled' | 'returns';
 
 type PurchaseFeedEntry =
-  | { type: 'po'; data: Purchase; timestamp: string }
-  | { type: 'return'; data: PurchaseReturn; timestamp: string };
+  | { type: 'po'; data: Purchase; timestamp: string; dayKey: string }
+  | { type: 'return'; data: PurchaseReturn; timestamp: string; dayKey: string };
 
-const isThisMonth = (iso: string) => {
+interface SupplierSummary {
+  key: string;
+  name: string;
+  phone: string;
+  poCount: number;
+  totalBought: number;
+  balanceToPay: number;
+}
+
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+const toLocalDayKey = (iso?: string): string => {
+  if (!iso) return todayISODate();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso;
   const d = new Date(iso);
-  const n = new Date();
-  return d.getMonth() === n.getMonth() && d.getFullYear() === n.getFullYear();
+  if (Number.isNaN(d.getTime())) return todayISODate();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+const shiftDayKey = (daysOffset: number): string => {
+  const d = new Date();
+  d.setDate(d.getDate() + daysOffset);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+const formatDayHeading = (dayKey: string, todayKey: string, yesterdayKey: string): string => {
+  if (dayKey === todayKey) return 'Today';
+  if (dayKey === yesterdayKey) return 'Yesterday';
+  const d = new Date(`${dayKey}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return dayKey;
+  return `${WEEKDAYS[d.getDay()]}, ${formatShortDate(d, true)}`;
+};
+
+const isPoLate = (p: Purchase, todayKey: string): boolean =>
+  (p.status === 'ordered' || p.status === 'partly_received') &&
+  Boolean(p.expectedDate) &&
+  toLocalDayKey(p.expectedDate) < todayKey;
+
+const normPhoneDigits = (phone?: string): string => {
+  const digits = String(phone || '').replace(/\D/g, '');
+  if (digits.length < 7) return '';
+  return digits.length > 10 ? digits.slice(-10) : digits;
 };
 
 export const PurchaseView: React.FC = () => {
   const { permissions } = useAuth();
+  const { showActionToast } = useInventory();
   const trade = useTrade();
   const { purchases, purchaseReturns } = trade;
   const toast = useToast();
   const showPrices = permissions.canViewCostPerUnit;
 
+  const [activeTab, setActiveTab] = useState<PurchaseTab>('orders');
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<Filter>('all');
   const [newOpen, setNewOpen] = useState<null | 'blank' | 'lowstock'>(null);
   const [detailId, setDetailId] = useState<string | null>(null);
+  const [returnDetail, setReturnDetail] = useState<PurchaseReturn | null>(null);
   const [receiveFor, setReceiveFor] = useState<Purchase | null>(null);
   const [payFor, setPayFor] = useState<{ po: Purchase; kind: 'payment' | 'refund' } | null>(null);
   const [returnFor, setReturnFor] = useState<Purchase | null>(null);
@@ -91,68 +134,204 @@ export const PurchaseView: React.FC = () => {
   const [deleteReturnFor, setDeleteReturnFor] = useState<PurchaseReturn | null>(null);
 
   const detail = purchases.find((p) => p.id === detailId) || null;
+  const todayKey = todayISODate();
+  const yesterdayKey = shiftDayKey(-1);
+  const thirtyDaysAgoKey = shiftDayKey(-29);
 
   const stats = useMemo(() => {
     const live = purchases.filter((p) => p.status !== 'cancelled');
     const open = live.filter((p) => p.status === 'ordered' || p.status === 'partly_received');
-    const pendingLines = open.reduce((a, p) => a + p.lines.filter((l) => ((p.receivedQty || {})[l.itemId] || 0) < l.quantity).length, 0);
+    const pendingLines = open.reduce(
+      (a, p) => a + p.lines.filter((l) => ((p.receivedQty || {})[l.itemId] || 0) < l.quantity).length,
+      0
+    );
+    const total30d = round2(
+      live
+        .filter((p) => toLocalDayKey(p.createdAt) >= thirtyDaysAgoKey)
+        .reduce((a, p) => a + (p.grandTotal || 0), 0)
+    );
     return {
       open: open.length,
-      month: live.filter((p) => isThisMonth(p.createdAt)).reduce((a, p) => a + p.grandTotal, 0),
+      total30d,
       pendingLines,
-      payable: live.reduce((a, p) => a + Math.max(0, moneyPosition(p).balance), 0),
+      payable: round2(live.reduce((a, p) => a + Math.max(0, moneyPosition(p).balance), 0)),
     };
-  }, [purchases]);
+  }, [purchases, thirtyDaysAgoKey]);
 
   const q = search.trim().toLowerCase();
+
+  const lateCount = useMemo(
+    () => purchases.filter((p) => isPoLate(p, todayKey)).length,
+    [purchases, todayKey]
+  );
+
   const filtered = useMemo(
     () =>
       purchases.filter((p) => {
         if (filter === 'open' && !(p.status === 'ordered' || p.status === 'partly_received')) return false;
+        if (filter === 'late' && !isPoLate(p, todayKey)) return false;
         if (filter === 'unpaid' && (p.status === 'cancelled' || moneyPosition(p).balance <= 0.009)) return false;
         if (filter === 'received' && p.status !== 'received') return false;
         if (filter === 'cancelled' && p.status !== 'cancelled') return false;
         if (!q) return true;
-        return p.poNumber.toLowerCase().includes(q) || p.supplier.name.toLowerCase().includes(q) || p.lines.some((l) => l.itemName.toLowerCase().includes(q));
+        return (
+          p.poNumber.toLowerCase().includes(q) ||
+          p.supplier.name.toLowerCase().includes(q) ||
+          (p.supplier.phone || '').toLowerCase().includes(q) ||
+          p.lines.some((l) => l.itemName.toLowerCase().includes(q))
+        );
       }),
-    [purchases, filter, q]
+    [purchases, filter, q, todayKey]
   );
+
   const filteredReturns = useMemo(
-    () => purchaseReturns.filter((r) => !q || r.returnNumber.toLowerCase().includes(q) || r.poNumber.toLowerCase().includes(q) || r.supplierName.toLowerCase().includes(q)),
+    () =>
+      purchaseReturns.filter(
+        (r) =>
+          !q ||
+          r.returnNumber.toLowerCase().includes(q) ||
+          r.poNumber.toLowerCase().includes(q) ||
+          r.supplierName.toLowerCase().includes(q) ||
+          r.lines.some((l) => l.itemName.toLowerCase().includes(q))
+      ),
     [purchaseReturns, q]
   );
 
   const feedItems = useMemo<PurchaseFeedEntry[]>(() => {
     if (filter === 'returns') {
-      return filteredReturns.map((r) => ({
-        type: 'return',
-        data: r,
-        timestamp: r.createdAt || r.date || '',
-      }));
+      return [...filteredReturns]
+        .map((r) => {
+          const ts = r.createdAt || r.date || '';
+          return {
+            type: 'return' as const,
+            data: r,
+            timestamp: ts,
+            dayKey: toLocalDayKey(r.createdAt || r.date),
+          };
+        })
+        .sort((a, b) => (new Date(b.timestamp).getTime() || 0) - (new Date(a.timestamp).getTime() || 0));
     }
     if (filter === 'all') {
       const poEntries: PurchaseFeedEntry[] = filtered.map((p) => ({
         type: 'po',
         data: p,
         timestamp: p.createdAt,
+        dayKey: toLocalDayKey(p.createdAt),
       }));
-      const returnEntries: PurchaseFeedEntry[] = filteredReturns.map((r) => ({
-        type: 'return',
-        data: r,
-        timestamp: r.createdAt || r.date || '',
-      }));
-      return [...poEntries, ...returnEntries].sort((a, b) => {
-        const ta = new Date(a.timestamp).getTime() || 0;
-        const tb = new Date(b.timestamp).getTime() || 0;
-        return tb - ta;
+      const returnEntries: PurchaseFeedEntry[] = filteredReturns.map((r) => {
+        const ts = r.createdAt || r.date || '';
+        return {
+          type: 'return',
+          data: r,
+          timestamp: ts,
+          dayKey: toLocalDayKey(r.createdAt || r.date),
+        };
       });
+      return [...poEntries, ...returnEntries].sort(
+        (a, b) => (new Date(b.timestamp).getTime() || 0) - (new Date(a.timestamp).getTime() || 0)
+      );
     }
-    return filtered.map((p) => ({
-      type: 'po',
-      data: p,
-      timestamp: p.createdAt,
-    }));
+    return [...filtered]
+      .map((p) => ({
+        type: 'po' as const,
+        data: p,
+        timestamp: p.createdAt,
+        dayKey: toLocalDayKey(p.createdAt),
+      }))
+      .sort((a, b) => (new Date(b.timestamp).getTime() || 0) - (new Date(a.timestamp).getTime() || 0));
   }, [filter, filtered, filteredReturns]);
+
+  // Day-grouped feed for the Daily Purchase Register
+  const dayGroups = useMemo(() => {
+    const groups: {
+      dayKey: string;
+      label: string;
+      entries: PurchaseFeedEntry[];
+      poCount: number;
+      returnCount: number;
+      dayTotal: number;
+    }[] = [];
+    const byKey = new Map<string, (typeof groups)[number]>();
+
+    for (const entry of feedItems) {
+      let grp = byKey.get(entry.dayKey);
+      if (!grp) {
+        grp = {
+          dayKey: entry.dayKey,
+          label: formatDayHeading(entry.dayKey, todayKey, yesterdayKey),
+          entries: [],
+          poCount: 0,
+          returnCount: 0,
+          dayTotal: 0,
+        };
+        byKey.set(entry.dayKey, grp);
+        groups.push(grp);
+      }
+      grp.entries.push(entry);
+      if (entry.type === 'po') {
+        if (entry.data.status !== 'cancelled') {
+          grp.poCount += 1;
+          grp.dayTotal = round2(grp.dayTotal + (entry.data.grandTotal || 0));
+        }
+      } else {
+        grp.returnCount += 1;
+      }
+    }
+    return groups;
+  }, [feedItems, todayKey, yesterdayKey]);
+
+  // Suppliers derived from non-cancelled purchases grouped by supplier phone (or name if no phone)
+  const supplierList = useMemo<SupplierSummary[]>(() => {
+    const map = new Map<string, SupplierSummary>();
+    const nameToKey = new Map<string, string>();
+
+    // First pass for purchases with phone so name-only matches can link when clean
+    for (const p of purchases) {
+      if (p.status === 'cancelled') continue;
+      const phoneDigits = normPhoneDigits(p.supplier.phone);
+      const normName = p.supplier.name.trim().toLowerCase();
+      if (phoneDigits && normName && !nameToKey.has(normName)) {
+        nameToKey.set(normName, `phone:${phoneDigits}`);
+      }
+    }
+
+    for (const p of purchases) {
+      if (p.status === 'cancelled') continue;
+      const phoneDigits = normPhoneDigits(p.supplier.phone);
+      const normName = p.supplier.name.trim().toLowerCase();
+      const key = phoneDigits
+        ? `phone:${phoneDigits}`
+        : nameToKey.get(normName) || `name:${normName || 'unknown'}`;
+
+      const pos = moneyPosition(p);
+      let entry = map.get(key);
+      if (!entry) {
+        entry = {
+          key,
+          name: p.supplier.name.trim() || 'Supplier',
+          phone: p.supplier.phone?.trim() || '',
+          poCount: 0,
+          totalBought: 0,
+          balanceToPay: 0,
+        };
+        map.set(key, entry);
+      } else {
+        if (!entry.phone && p.supplier.phone?.trim()) {
+          entry.phone = p.supplier.phone.trim();
+        }
+      }
+      entry.poCount += 1;
+      entry.totalBought = round2(entry.totalBought + (p.grandTotal || 0));
+      entry.balanceToPay = round2(entry.balanceToPay + Math.max(0, pos.balance));
+    }
+
+    return Array.from(map.values()).sort(
+      (a, b) =>
+        b.balanceToPay - a.balanceToPay ||
+        b.totalBought - a.totalBought ||
+        a.name.localeCompare(b.name)
+    );
+  }, [purchases]);
 
   const exportExcel = () => {
     downloadExcelFile(
@@ -231,158 +410,475 @@ export const PurchaseView: React.FC = () => {
   };
 
   return (
-    <div className="space-y-5 max-w-5xl">
-      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
-        <div className="flex items-start gap-3">
-          <div className="w-11 h-11 shrink-0 rounded-2xl bg-sky-50 border border-sky-200 text-sky-600 flex items-center justify-center">
-            <ShoppingBag className="w-5 h-5" />
+    <div className="space-y-3.5 max-w-[900px] mx-auto pb-36 overflow-x-clip">
+      {/* 1. HEADER: One compact row */}
+      <div className="flex items-center justify-end sm:justify-between gap-2">
+        <div className="hidden sm:flex items-center gap-2.5 min-w-0">
+          <div className="w-9 h-9 shrink-0 rounded-xl bg-sky-50 border border-sky-200 text-sky-600 flex items-center justify-center">
+            <ShoppingBag className="w-4 h-4" />
           </div>
-          <div>
-            <h1 className="text-xl sm:text-2xl font-black text-slate-900 leading-tight">Purchase Orders</h1>
-            <p className="text-xs sm:text-sm text-slate-500 mt-1">Order raw materials, receive goods and pay suppliers.</p>
-          </div>
+          <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight truncate">
+            Purchase
+          </h1>
         </div>
-        <div className="flex gap-2 flex-wrap shrink-0">
+
+        <div className="flex items-center gap-1.5 shrink-0">
           {permissions.canExportExcel && (
-            <SmallButton icon={FileSpreadsheet} onClick={exportExcel}>
-              Export Excel
-            </SmallButton>
+            <button
+              type="button"
+              onClick={exportExcel}
+              title="Export Excel"
+              aria-label="Export Excel"
+              className="inline-flex items-center gap-1.5 px-2.5 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-bold transition cursor-pointer shadow-2xs"
+            >
+              <FileSpreadsheet className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span>Excel</span>
+            </button>
           )}
           {permissions.canCreatePurchase && (
-            <>
-              <SmallButton tone="amber" icon={AlertTriangle} onClick={() => setNewOpen('lowstock')}>
-                From Low Stock
-              </SmallButton>
-              <button type="button" onClick={() => setNewOpen('blank')} className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white cursor-pointer">
-                <Plus className="w-3.5 h-3.5" />
-                New PO
-              </button>
-            </>
+            <button
+              type="button"
+              onClick={() => setNewOpen('lowstock')}
+              title="From Low Stock"
+              aria-label="From Low Stock"
+              className="inline-flex items-center gap-1.5 px-2.5 py-2 rounded-xl border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800 text-xs font-bold transition cursor-pointer shadow-2xs"
+            >
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+              <span className="hidden sm:inline">From Low Stock</span>
+              <span className="sm:hidden">Low Stock</span>
+            </button>
           )}
         </div>
       </div>
 
       {trade.tradeError && <ErrorBox message={trade.tradeError} />}
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <StatCard label="Open orders" value={String(stats.open)} tone="sky" icon={ShoppingBag} />
-        <StatCard label="Lines to receive" value={String(stats.pendingLines)} tone="amber" icon={Truck} />
-        {showPrices && <StatCard label="Ordered (month)" value={formatINRShort(stats.month)} tone="indigo" icon={BarChart3} />}
-        {showPrices && <StatCard label="Payable" value={formatINRShort(stats.payable)} tone="rose" icon={Wallet} />}
+      {/* 2. TABS under header: Orders (N) | Suppliers (N) */}
+      <div className="grid grid-cols-2 gap-1 p-1 bg-slate-200/70 rounded-xl">
+        <button
+          type="button"
+          onClick={() => setActiveTab('orders')}
+          className={`py-2 px-3 rounded-lg text-xs sm:text-sm font-bold transition cursor-pointer ${
+            activeTab === 'orders'
+              ? 'bg-white text-slate-900 shadow-2xs'
+              : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          Orders ({feedItems.length})
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('suppliers')}
+          className={`py-2 px-3 rounded-lg text-xs sm:text-sm font-bold transition cursor-pointer ${
+            activeTab === 'suppliers'
+              ? 'bg-white text-slate-900 shadow-2xs'
+              : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          Suppliers ({supplierList.length})
+        </button>
       </div>
 
-      <div className="bg-white rounded-2xl border border-slate-200 p-3 space-y-2.5">
-        <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-50 border border-slate-200">
-          <Search className="w-4 h-4 text-slate-400" />
-          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search PO number, supplier or item…" className="flex-1 bg-transparent text-sm outline-none" />
-        </div>
-        <div className="flex gap-1.5 overflow-x-auto no-scrollbar">
-          {(
-            [
-              ['all', purchaseReturns.length > 0 ? `All (${purchases.length + purchaseReturns.length})` : 'All'],
-              ['open', 'To receive'],
-              ...(showPrices ? [['unpaid', 'Unpaid']] : []),
-              ['received', 'Received'],
-              ['cancelled', 'Cancelled'],
-              ...(permissions.canViewPurchaseOption ? [['returns', purchaseReturns.length > 0 ? `Returns (${purchaseReturns.length})` : 'Returns']] : []),
-            ] as [Filter, string][]
-          ).map(([id, label]) => (
-            <button key={id} type="button" onClick={() => setFilter(id)} className={`px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap cursor-pointer ${filter === id ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'}`}>
-              {label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="space-y-3">
-        {feedItems.length === 0 && (
-          <Empty
-            text={
-              filter === 'returns'
-                ? 'No purchase returns yet.'
-                : purchases.length === 0 && purchaseReturns.length === 0
-                ? 'No purchase orders yet.'
-                : 'No orders or returns match this filter.'
-            }
-          />
-        )}
-        {feedItems.map((entry) => {
-          if (entry.type === 'return') {
-            const r = entry.data;
-            const parentPo = purchases.find((p) => p.id === r.purchaseId);
-            return (
-              <PReturnCard
-                key={`ret-${r.id}`}
-                r={r}
-                po={parentPo}
-                showPrices={showPrices}
-                canEdit={permissions.canEditPurchaseReturn}
-                canDelete={permissions.canDeletePurchaseReturn}
-                onEdit={(ret) => {
-                  if (parentPo) setEditReturnFor({ r: ret, po: parentPo });
-                }}
-                onDelete={(ret) => setDeleteReturnFor(ret)}
-                onError={(m) => toast.show('PDF failed', m, true)}
+      {/* ====================================================================
+          3. ORDERS TAB (DAILY PURCHASE REGISTER)
+      ==================================================================== */}
+      {activeTab === 'orders' && (
+        <div className="space-y-3">
+          {/* Search + Filter Chips */}
+          <div className="bg-white rounded-2xl border border-slate-200 p-2.5 space-y-2 shadow-2xs">
+            <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-50 border border-slate-200">
+              <Search className="w-4 h-4 text-slate-400 shrink-0" />
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search PO, supplier or item…"
+                className="flex-1 min-w-0 bg-transparent text-sm outline-none text-slate-900 placeholder:text-slate-400"
               />
-            );
-          }
-          const p = entry.data;
-          const pos = moneyPosition(p);
-          return (
-            <div key={p.id} className="bg-white rounded-2xl border border-slate-200 p-4 space-y-2.5">
-              <div className="flex items-center justify-between gap-2">
-                <div className="font-mono font-bold text-sm text-slate-900">{p.poNumber}</div>
-                <div className="text-[11px] text-slate-400">{p.expectedDate ? `Due ${fmtDate(p.expectedDate)}` : fmtDateTime(p.createdAt)}</div>
-              </div>
-              <div className="flex gap-1.5 flex-wrap">
-                <Chip tone={STATUS[p.status].tone}>{STATUS[p.status].label}</Chip>
-                {showPrices && p.status !== 'cancelled' && <Chip tone={PAY[pos.status].tone}>{PAY[pos.status].label}</Chip>}
-                {p.returnStatus !== 'none' && <Chip tone="amber">{p.returnStatus === 'fully_returned' ? 'Fully returned' : 'Partly returned'}</Chip>}
-              </div>
-              <div className="font-bold text-slate-800">{p.supplier.name}</div>
-              <div className="space-y-1.5">
-                {p.lines.map((l) => {
-                  const got = (p.receivedQty || {})[l.itemId] || 0;
-                  return (
-                    <div key={l.itemId} className="text-[11px]">
-                      <div className="flex justify-between text-slate-600 gap-2">
-                        <span className="truncate">
-                          {l.itemName} ({l.unit})
-                        </span>
-                        <span className="font-mono font-bold shrink-0">
-                          {got} / {l.quantity}
-                        </span>
-                      </div>
-                      <div className="h-1.5 rounded-full bg-slate-100 mt-1">
-                        <div className={`h-1.5 rounded-full ${got >= l.quantity ? 'bg-emerald-500' : 'bg-sky-500'}`} style={{ width: `${Math.min(100, (got / l.quantity) * 100)}%` }} />
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-              {showPrices && (
-                <div className="flex justify-between text-xs pt-1 border-t border-slate-100">
-                  <span className="text-slate-500">
-                    Total <b className="text-slate-900">{formatINR(p.grandTotal)}</b>
-                  </span>
-                  {p.status !== 'cancelled' && (
-                    <span className={`font-bold ${pos.balance > 0.009 ? 'text-rose-600' : pos.balance < -0.009 ? 'text-amber-600' : 'text-emerald-600'}`}>
-                      {pos.balance < -0.009 ? `Refund due ${formatINR(-pos.balance)}` : `Payable ${formatINR(Math.max(0, pos.balance))}`}
-                    </span>
-                  )}
-                </div>
+              {search && (
+                <button
+                  type="button"
+                  onClick={() => setSearch('')}
+                  aria-label="Clear search"
+                  className="text-slate-400 hover:text-slate-700 cursor-pointer shrink-0"
+                >
+                  <X className="w-4 h-4" />
+                </button>
               )}
-              {actions(p)}
             </div>
-          );
-        })}
-        {filter !== 'returns' && <LoadMore show={trade.hasMorePurchases} onClick={trade.loadMorePurchases} />}
+            <div className="flex gap-1.5 overflow-x-auto no-scrollbar">
+              {(
+                [
+                  ['all', purchaseReturns.length > 0 ? `All (${purchases.length + purchaseReturns.length})` : 'All'],
+                  ['open', 'To receive'],
+                  ['late', lateCount > 0 ? `Late (${lateCount})` : 'Late'],
+                  ...(showPrices ? [['unpaid', 'Unpaid']] : []),
+                  ['received', 'Received'],
+                  ['cancelled', 'Cancelled'],
+                  ...(permissions.canViewPurchaseOption
+                    ? [['returns', purchaseReturns.length > 0 ? `Returns (${purchaseReturns.length})` : 'Returns']]
+                    : []),
+                ] as [Filter, string][]
+              ).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setFilter(id)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap cursor-pointer shrink-0 transition ${
+                    filter === id
+                      ? id === 'late'
+                        ? 'bg-rose-600 text-white'
+                        : 'bg-slate-900 text-white'
+                      : id === 'late' && lateCount > 0
+                      ? 'bg-rose-50 text-rose-700 border border-rose-200'
+                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200/70'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Day-Grouped Compact PO & Return Rows */}
+          {dayGroups.length === 0 ? (
+            <Empty
+              text={
+                filter === 'returns'
+                  ? 'No purchase returns yet.'
+                  : purchases.length === 0 && purchaseReturns.length === 0
+                  ? 'No purchase orders yet.'
+                  : 'No orders or returns match this filter.'
+              }
+            />
+          ) : (
+            <div className="space-y-3">
+              {dayGroups.map((grp) => {
+                const rightParts: string[] = [];
+                if (showPrices && grp.poCount > 0) {
+                  rightParts.push(formatINR(grp.dayTotal, grp.dayTotal % 1 !== 0));
+                }
+                if (grp.poCount > 0) {
+                  rightParts.push(`${grp.poCount} ${grp.poCount === 1 ? 'PO' : 'POs'}`);
+                } else if (grp.returnCount > 0) {
+                  rightParts.push(`${grp.returnCount} ${grp.returnCount === 1 ? 'return' : 'returns'}`);
+                } else {
+                  rightParts.push('Cancelled');
+                }
+
+                return (
+                  <div
+                    key={grp.dayKey}
+                    className="bg-white rounded-2xl border border-slate-200 overflow-x-clip shadow-2xs"
+                  >
+                    {/* Sticky Day Header */}
+                    <div
+                      style={{ top: 'calc(4rem + env(safe-area-inset-top))' }}
+                      className="sticky z-10 px-3.5 py-2 rounded-t-2xl bg-slate-100/95 backdrop-blur-xs border-b border-slate-200 flex items-center justify-between gap-2 text-[11px] font-bold text-slate-700"
+                    >
+                      <span className="truncate">{grp.label}</span>
+                      <span className="shrink-0 font-mono tabular-nums text-slate-800">
+                        {rightParts.join(' · ')}
+                      </span>
+                    </div>
+
+                    <div className="divide-y divide-slate-100 rounded-b-2xl overflow-hidden">
+                      {grp.entries.map((entry) => {
+                        if (entry.type === 'return') {
+                          const r = entry.data;
+                          return (
+                            <button
+                              key={`ret-${r.id}`}
+                              type="button"
+                              onClick={() => setReturnDetail(r)}
+                              className="w-full text-left px-3 py-2.5 flex items-center gap-2 hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer"
+                            >
+                              {/* Left */}
+                              <div className="min-w-0 flex-1">
+                                <div className="text-xs sm:text-sm font-mono font-bold text-slate-900 truncate">
+                                  {r.returnNumber}
+                                </div>
+                                <div className="text-[11px] text-slate-500 truncate mt-0.5">
+                                  {r.supplierName}
+                                </div>
+                              </div>
+
+                              {/* Middle */}
+                              <div className="w-[74px] sm:w-[110px] shrink-0 text-left">
+                                <div className="text-[11px] font-medium text-slate-600 truncate">
+                                  {r.lines.length} {r.lines.length === 1 ? 'item' : 'items'}
+                                </div>
+                                <div className="text-[10px] font-mono text-slate-400 truncate mt-0.5">
+                                  {r.poNumber}
+                                </div>
+                              </div>
+
+                              {/* Right */}
+                              <div className="shrink-0 text-right flex flex-col items-end gap-0.5">
+                                <div className="flex items-center justify-end gap-1.5">
+                                  {showPrices && (
+                                    <span className="text-xs sm:text-sm font-bold font-mono tabular-nums text-slate-900">
+                                      – {formatINR(r.total, r.total % 1 !== 0)}
+                                    </span>
+                                  )}
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
+                                    Return
+                                  </span>
+                                </div>
+                              </div>
+                            </button>
+                          );
+                        }
+
+                        const p = entry.data;
+                        const pos = moneyPosition(p);
+                        const late = isPoLate(p, todayKey);
+
+                        // Received bar calculations for partly_received
+                        const totalLines = p.lines.length;
+                        const completedLines = p.lines.filter(
+                          (l) => ((p.receivedQty || {})[l.itemId] || 0) >= l.quantity - 1e-9
+                        ).length;
+                        const totalOrderedQty = p.lines.reduce((s, l) => s + (l.quantity || 0), 0);
+                        const totalGotQty = p.lines.reduce(
+                          (s, l) => s + Math.min(l.quantity || 0, (p.receivedQty || {})[l.itemId] || 0),
+                          0
+                        );
+                        const pctBar =
+                          totalLines > 0
+                            ? completedLines > 0
+                              ? Math.round((completedLines / totalLines) * 100)
+                              : totalOrderedQty > 0
+                              ? Math.round((totalGotQty / totalOrderedQty) * 100)
+                              : 0
+                            : 0;
+
+                        let chipLabel = 'Ordered';
+                        let chipClass = 'bg-indigo-50 text-indigo-700 border-indigo-200';
+                        if (p.status === 'cancelled') {
+                          chipLabel = 'Cancelled';
+                          chipClass = 'bg-slate-100 text-slate-600 border-slate-200';
+                        } else if (p.status === 'received') {
+                          chipLabel = 'Received';
+                          chipClass = 'bg-emerald-50 text-emerald-700 border-emerald-200';
+                        } else if (late) {
+                          chipLabel = 'Late';
+                          chipClass = 'bg-rose-50 text-rose-700 border-rose-200';
+                        } else if (p.status === 'partly_received') {
+                          chipLabel = 'Part received';
+                          chipClass = 'bg-sky-50 text-sky-700 border-sky-200';
+                        }
+
+                        const showPaySub =
+                          showPrices && p.status !== 'cancelled' && pos.balance > 0.009;
+                        const paySubText =
+                          pos.status === 'partly_paid' ? 'Part paid' : 'Unpaid';
+
+                        return (
+                          <button
+                            key={p.id}
+                            type="button"
+                            onClick={() => setDetailId(p.id)}
+                            className="w-full text-left px-3 py-2.5 flex items-center gap-2 hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer"
+                          >
+                            {/* Left: PO number bold + supplier name small grey */}
+                            <div className="min-w-0 flex-1">
+                              <div className="text-xs sm:text-sm font-mono font-bold text-slate-900 truncate">
+                                {p.poNumber}
+                              </div>
+                              <div className="text-[11px] text-slate-500 truncate mt-0.5">
+                                {p.supplier.name}
+                              </div>
+                            </div>
+
+                            {/* Middle: item count + received progress bar when partly received */}
+                            <div className="w-[70px] sm:w-[96px] shrink-0 text-left">
+                              <div className="text-[11px] font-medium text-slate-600 truncate">
+                                {totalLines} {totalLines === 1 ? 'item' : 'items'}
+                              </div>
+                              {p.status === 'partly_received' && (
+                                <div className="mt-1">
+                                  <div className="text-[10px] font-mono font-semibold text-sky-700 leading-none">
+                                    {completedLines}/{totalLines} recd
+                                  </div>
+                                  <div className="h-1 rounded-full bg-slate-100 mt-1 overflow-hidden">
+                                    <div
+                                      className="h-1 rounded-full bg-sky-500"
+                                      style={{ width: `${Math.min(100, Math.max(8, pctBar))}%` }}
+                                    />
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Right: Amount (if showPrices) + single status chip + Unpaid/Part paid under amount */}
+                            <div className="shrink-0 text-right flex flex-col items-end gap-0.5">
+                              <div className="flex items-center justify-end gap-1.5">
+                                {showPrices && (
+                                  <span className="text-xs sm:text-sm font-bold font-mono tabular-nums text-slate-900">
+                                    {formatINR(p.grandTotal, p.grandTotal % 1 !== 0)}
+                                  </span>
+                                )}
+                                <span
+                                  className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border whitespace-nowrap ${chipClass}`}
+                                >
+                                  {chipLabel}
+                                </span>
+                              </div>
+                              {showPaySub && (
+                                <span
+                                  className={`text-[10px] font-bold leading-none ${
+                                    pos.status === 'partly_paid' ? 'text-amber-600' : 'text-rose-600'
+                                  }`}
+                                >
+                                  {paySubText}
+                                </span>
+                              )}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {filter !== 'returns' && (
+            <LoadMore show={trade.hasMorePurchases} onClick={trade.loadMorePurchases} />
+          )}
+        </div>
+      )}
+
+      {/* ====================================================================
+          6. SUPPLIERS TAB
+      ==================================================================== */}
+      {activeTab === 'suppliers' && (
+        <div className="space-y-2">
+          {supplierList.length === 0 ? (
+            <Empty text="No suppliers yet. Create a purchase order to see suppliers here." />
+          ) : (
+            <div className="bg-white rounded-2xl border border-slate-200 divide-y divide-slate-100 overflow-hidden shadow-2xs">
+              {supplierList.map((s) => (
+                <button
+                  key={s.key}
+                  type="button"
+                  onClick={() => {
+                    setFilter('all');
+                    setSearch(s.name);
+                    setActiveTab('orders');
+                  }}
+                  className="w-full text-left px-3.5 py-3 flex items-center justify-between gap-2.5 hover:bg-slate-50 active:bg-slate-100 transition cursor-pointer"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-bold text-slate-900 truncate">{s.name}</div>
+                    <div className="text-[11px] text-slate-500 truncate mt-0.5">
+                      {[s.phone, `${s.poCount} ${s.poCount === 1 ? 'PO' : 'POs'}`]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0 text-right">
+                    {showPrices && (
+                      <div>
+                        <div className="text-xs sm:text-sm font-bold font-mono tabular-nums text-slate-900">
+                          {formatINR(s.totalBought, s.totalBought % 1 !== 0)}
+                        </div>
+                        {s.balanceToPay > 0.009 && (
+                          <div className="text-[10px] font-bold font-mono tabular-nums text-rose-600 mt-0.5">
+                            To pay {formatINR(s.balanceToPay, s.balanceToPay % 1 !== 0)}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    <ChevronRight className="w-4 h-4 text-slate-400 shrink-0" />
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 5. FLOATING "+ New PO" BUTTON (bottom-right, above summary bar) */}
+      {permissions.canCreatePurchase && (
+        <button
+          type="button"
+          onClick={() => setNewOpen('blank')}
+          style={{ bottom: 'calc(4rem + env(safe-area-inset-bottom))' }}
+          className="fixed right-4 z-30 inline-flex items-center gap-1.5 px-4 py-2.5 rounded-full text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white shadow-lg cursor-pointer active:scale-95 transition"
+        >
+          <Plus className="w-4 h-4" />
+          <span>New PO</span>
+        </button>
+      )}
+
+      {/* 4. SLIM SUMMARY BAR FIXED AT BOTTOM */}
+      <div
+        style={{ paddingBottom: 'calc(0.5rem + env(safe-area-inset-bottom))' }}
+        className="fixed bottom-0 left-0 right-0 lg:left-64 z-20 bg-slate-900 text-white border-t border-slate-800 px-3 py-2"
+      >
+        <div className="max-w-[900px] mx-auto text-center text-xs font-semibold tabular-nums truncate">
+          {showPrices ? (
+            <>
+              <span className="text-slate-300">30 days </span>
+              <span className="font-bold text-white">{formatINRShort(stats.total30d)}</span>
+              <span className="text-slate-500"> · </span>
+              <span className="text-slate-300">POs </span>
+              <span className="font-bold text-white">{stats.open}</span>
+              <span className="text-slate-500"> · </span>
+              <span className="text-slate-300">To receive </span>
+              <span className="font-bold text-sky-300">{stats.pendingLines}</span>
+              <span className="text-slate-500"> · </span>
+              <span className="text-slate-300">To pay </span>
+              <span className="font-bold text-rose-400">{formatINRShort(stats.payable)}</span>
+            </>
+          ) : (
+            <>
+              <span className="text-slate-300">30 days</span>
+              <span className="text-slate-500"> · </span>
+              <span className="text-slate-300">POs </span>
+              <span className="font-bold text-white">{stats.open}</span>
+              <span className="text-slate-500"> · </span>
+              <span className="text-slate-300">To receive </span>
+              <span className="font-bold text-sky-300">{stats.pendingLines}</span>
+            </>
+          )}
+        </div>
       </div>
 
-      {newOpen && <NewPurchaseSheet lowStock={newOpen === 'lowstock'} onClose={() => setNewOpen(null)} onSaved={(p) => toast.show(`${p.poNumber} created`, `${p.lines.length} item(s) ordered from ${p.supplier.name}`)} />}
-      {receiveFor && <ReceiveSheet po={receiveFor} showPrices={showPrices} onClose={() => setReceiveFor(null)} onSaved={() => toast.show('Goods received', 'Stock updated.')} />}
-      {returnFor && <PurchaseReturnSheet po={returnFor} showPrices={showPrices} onClose={() => setReturnFor(null)} onSaved={(r) => toast.show(`Return ${r.returnNumber} saved`, showPrices ? `Debit note ${formatINR(r.total)}` : 'Stock updated.')} />}
+      {/* Existing Modals / Sheets */}
+      {newOpen && <NewPurchaseSheet lowStock={newOpen === 'lowstock'} onClose={() => setNewOpen(null)} onSaved={() => {}} />}
+      {receiveFor && <ReceiveSheet po={receiveFor} showPrices={showPrices} onClose={() => setReceiveFor(null)} onSaved={() => {}} />}
+      {returnFor && <PurchaseReturnSheet po={returnFor} showPrices={showPrices} onClose={() => setReturnFor(null)} onSaved={() => {}} />}
       {detail && <PurchaseDetailSheet po={detail} showPrices={showPrices} returns={purchaseReturns.filter((r) => r.purchaseId === detail.id)} actions={actions(detail, true)} onClose={() => setDetailId(null)} />}
+      {returnDetail && (
+        <ReturnDetailSheet
+          r={returnDetail}
+          po={purchases.find((p) => p.id === returnDetail.purchaseId)}
+          showPrices={showPrices}
+          canEdit={permissions.canEditPurchaseReturn}
+          canDelete={permissions.canDeletePurchaseReturn}
+          onClose={() => setReturnDetail(null)}
+          onOpenParentPo={(poId) => {
+            setReturnDetail(null);
+            setDetailId(poId);
+          }}
+          onEdit={(ret) => {
+            const parentPo = purchases.find((p) => p.id === ret.purchaseId);
+            if (parentPo) {
+              setReturnDetail(null);
+              setEditReturnFor({ r: ret, po: parentPo });
+            }
+          }}
+          onDelete={(ret) => {
+            setReturnDetail(null);
+            setDeleteReturnFor(ret);
+          }}
+          onError={(m) => toast.show('PDF failed', m, true)}
+        />
+      )}
 
       <PaymentSheet
         open={!!payFor}
@@ -394,9 +890,27 @@ export const PurchaseView: React.FC = () => {
         submitLabel={payFor?.kind === 'refund' ? 'Save Refund Received' : 'Save Payment'}
         onSubmit={async (p) => {
           if (!payFor) return;
-          if (payFor.kind === 'refund') await trade.recordPurchaseRefund(payFor.po.id, p);
-          else await trade.recordPurchasePayment(payFor.po.id, p);
-          toast.show(payFor.kind === 'refund' ? 'Refund saved' : 'Payment saved', `${formatINR(p.amount)} on ${payFor.po.poNumber}`);
+          if (typeof navigator !== 'undefined' && !navigator.onLine) {
+            throw new Error('No internet connection — nothing was saved. Please try again.');
+          }
+          const target = payFor;
+          setPayFor(null);
+          showActionToast('Saving…', `${formatINR(p.amount)} on ${target.po.poNumber}`, 'saving');
+          const promise =
+            target.kind === 'refund'
+              ? trade.recordPurchaseRefund(target.po.id, p)
+              : trade.recordPurchasePayment(target.po.id, p);
+          promise
+            .then(() => {
+              showActionToast(
+                target.kind === 'refund' ? 'Refund saved' : 'Payment saved',
+                `${formatINR(p.amount)} on ${target.po.poNumber}`,
+                'success'
+              );
+            })
+            .catch((e: any) => {
+              showActionToast('Could not save', e?.message || 'Payment could not be saved.', 'error');
+            });
         }}
       />
 
@@ -405,7 +919,6 @@ export const PurchaseView: React.FC = () => {
           po={editFor}
           onClose={() => setEditFor(null)}
           onSaved={(p) => {
-            toast.show(`PO ${p.poNumber} updated`, 'Changes saved.');
             setEditFor(null);
             if (detailId === p.id) setDetailId(p.id);
           }}
@@ -421,11 +934,21 @@ export const PurchaseView: React.FC = () => {
         onCancel={() => setDeleteFor(null)}
         onConfirm={async (reason) => {
           if (!deleteFor) return;
-          await trade.deletePurchase(deleteFor.id, reason);
-          toast.show(`${deleteFor.poNumber} deleted`, 'Received stock reversed if applicable.');
-          const id = deleteFor.id;
+          if (typeof navigator !== 'undefined' && !navigator.onLine) {
+            throw new Error('No internet connection — nothing was saved. Please try again.');
+          }
+          const target = deleteFor;
           setDeleteFor(null);
-          if (detailId === id) setDetailId(null);
+          if (detailId === target.id) setDetailId(null);
+          showActionToast('Saving…', `Deleting ${target.poNumber}`, 'saving');
+          trade
+            .deletePurchase(target.id, reason)
+            .then(() => {
+              showActionToast(`${target.poNumber} deleted`, 'Received stock reversed if applicable.', 'success');
+            })
+            .catch((e: any) => {
+              showActionToast('Could not delete', e?.message || 'The purchase order could not be deleted.', 'error');
+            });
         }}
       />
 
@@ -438,9 +961,20 @@ export const PurchaseView: React.FC = () => {
         onCancel={() => setCancelFor(null)}
         onConfirm={async (reason) => {
           if (!cancelFor) return;
-          await trade.cancelPurchase(cancelFor.id, reason);
-          toast.show(`${cancelFor.poNumber} cancelled`);
+          if (typeof navigator !== 'undefined' && !navigator.onLine) {
+            throw new Error('No internet connection — nothing was saved. Please try again.');
+          }
+          const target = cancelFor;
           setCancelFor(null);
+          showActionToast('Saving…', `Cancelling ${target.poNumber}`, 'saving');
+          trade
+            .cancelPurchase(target.id, reason)
+            .then(() => {
+              showActionToast(`${target.poNumber} cancelled`, undefined, 'success');
+            })
+            .catch((e: any) => {
+              showActionToast('Could not cancel', e?.message || 'The order could not be cancelled.', 'error');
+            });
         }}
       />
       {editReturnFor && (
@@ -449,8 +983,7 @@ export const PurchaseView: React.FC = () => {
           po={editReturnFor.po}
           showPrices={showPrices}
           onClose={() => setEditReturnFor(null)}
-          onSaved={(updated) => {
-            toast.show(`Return ${updated.returnNumber} updated`, showPrices ? `Debit note ${formatINR(updated.total)}.` : 'Stock updated.');
+          onSaved={() => {
             setEditReturnFor(null);
           }}
         />
@@ -465,9 +998,20 @@ export const PurchaseView: React.FC = () => {
         onCancel={() => setDeleteReturnFor(null)}
         onConfirm={async (reason) => {
           if (!deleteReturnFor) return;
-          await trade.deletePurchaseReturn(deleteReturnFor.id, reason);
-          toast.show(`${deleteReturnFor.returnNumber} deleted`, 'Debit note cancelled and stock restored to inventory.');
+          if (typeof navigator !== 'undefined' && !navigator.onLine) {
+            throw new Error('No internet connection — nothing was saved. Please try again.');
+          }
+          const target = deleteReturnFor;
           setDeleteReturnFor(null);
+          showActionToast('Saving…', `Deleting ${target.returnNumber}`, 'saving');
+          trade
+            .deletePurchaseReturn(target.id, reason)
+            .then(() => {
+              showActionToast(`${target.returnNumber} deleted`, 'Debit note cancelled and stock restored to inventory.', 'success');
+            })
+            .catch((e: any) => {
+              showActionToast('Could not delete return', e?.message || 'The purchase return could not be deleted.', 'error');
+            });
         }}
       />
       {toast.view}
@@ -479,42 +1023,60 @@ const Empty: React.FC<{ text: string }> = ({ text }) => (
   <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-8 text-center text-sm text-slate-500">{text}</div>
 );
 
-const PReturnCard: React.FC<{
+const ReturnDetailSheet: React.FC<{
   r: PurchaseReturn;
   po?: Purchase;
   showPrices: boolean;
   canEdit?: boolean;
   canDelete?: boolean;
+  onClose: () => void;
+  onOpenParentPo: (poId: string) => void;
   onEdit?: (r: PurchaseReturn) => void;
   onDelete?: (r: PurchaseReturn) => void;
   onError: (m: string) => void;
-}> = ({ r, po, showPrices, canEdit, canDelete, onEdit, onDelete, onError }) => (
-  <div className="bg-white rounded-2xl border border-amber-200/80 bg-gradient-to-r from-amber-50/15 via-white to-white p-4 space-y-2">
-    <div className="flex items-center justify-between gap-2">
-      <div className="flex items-center gap-2">
-        <div className="font-mono font-bold text-sm text-slate-900">{r.returnNumber}</div>
-        <Chip tone="amber">Purchase Return</Chip>
-      </div>
-      <div className="text-[11px] text-slate-400">{fmtDate(r.date || r.createdAt)}</div>
+}> = ({ r, po, showPrices, canEdit, canDelete, onClose, onOpenParentPo, onEdit, onDelete, onError }) => (
+  <Sheet
+    open
+    onClose={onClose}
+    tone="amber"
+    icon={Undo2}
+    title={`${r.returnNumber} · Purchase Return`}
+    subtitle={`${r.supplierName} · Against ${r.poNumber}`}
+  >
+    <div className="flex gap-1.5 flex-wrap">
+      <Chip tone="amber">Purchase Return</Chip>
+      <Chip tone="slate">Against {r.poNumber}</Chip>
     </div>
-    <Chip tone="slate">Against {r.poNumber}</Chip>
-    <div className="font-bold text-slate-800">{r.supplierName}</div>
+
+    <div className="rounded-xl border border-slate-200 divide-y divide-slate-100">
+      {r.lines.map((l) => (
+        <div key={l.itemId} className="p-3 text-xs flex justify-between gap-2">
+          <div className="min-w-0">
+            <div className="font-bold text-slate-800 truncate">{l.itemName}</div>
+            <div className="text-slate-500">
+              {l.quantity} {l.unit}
+              {showPrices ? ` × ${formatINR(l.rate)}` : ''}
+            </div>
+          </div>
+          {showPrices && <div className="font-bold text-slate-900 shrink-0">{formatINR(l.amount)}</div>}
+        </div>
+      ))}
+    </div>
+
+    {showPrices && <Totals rows={[{ label: 'Debit note total', value: formatINR(r.total), bold: true }]} />}
+
     <div className="text-xs text-slate-500">
-      {r.lines.map((l) => `${l.itemName} × ${l.quantity}`).join(', ')} · {r.reason}
+      Reason: <b className="text-slate-800">{r.reason}</b> · {fmtDate(r.date || r.createdAt)} · by {r.createdByName || '—'}
     </div>
-    <div className="flex items-center justify-between text-xs pt-1 border-t border-slate-100">
-      {showPrices ? (
-        <span className="text-slate-500">
-          Debit note <b className="text-slate-900">{formatINR(r.total)}</b>
-        </span>
-      ) : (
-        <span />
-      )}
-      <span className="text-slate-400">by {r.createdByName || '—'}</span>
-    </div>
-    <div className="flex flex-wrap gap-2">
+
+    <div className="flex flex-wrap gap-2 pt-1">
       {showPrices && (
         <PdfButtons build={() => purchaseReturnPdf(r, po)} fileName={`${r.returnNumber}.pdf`} title={`Debit note ${r.returnNumber}`} onError={onError} />
+      )}
+      {po && (
+        <SmallButton icon={Eye} onClick={() => onOpenParentPo(po.id)}>
+          View {po.poNumber}
+        </SmallButton>
       )}
       {canEdit && onEdit && po && (
         <SmallButton tone="indigo" icon={Pencil} onClick={() => onEdit(r)}>
@@ -527,7 +1089,7 @@ const PReturnCard: React.FC<{
         </SmallButton>
       )}
     </div>
-  </div>
+  </Sheet>
 );
 
 // ---------------------------------------------------------------------------
@@ -541,8 +1103,8 @@ interface Row {
 }
 const rowKey = () => Math.random().toString(36).slice(2);
 
-const NewPurchaseSheet: React.FC<{ lowStock: boolean; onClose: () => void; onSaved: (p: Purchase) => void }> = ({ lowStock, onClose, onSaved }) => {
-  const { items } = useInventory();
+const NewPurchaseSheet: React.FC<{ lowStock: boolean; onClose: () => void; onSaved: (p: Purchase) => void }> = ({ lowStock, onClose }) => {
+  const { items, showActionToast } = useInventory();
   const { suppliers, createPurchase } = useTrade();
   const [supplier, setSupplier] = useState<PartyInfo>({ name: '', phone: '', gstin: '', address: '' });
   const [rows, setRows] = useState<Row[]>(() => {
@@ -577,17 +1139,20 @@ const NewPurchaseSheet: React.FC<{ lowStock: boolean; onClose: () => void; onSav
     const filled = rows.filter((r) => r.itemId);
     if (!filled.length) return setError('Add at least one item.');
     if (filled.some((r) => !(Number(r.quantity) > 0))) return setError('Enter a quantity on every item row.');
-    const lines: PurchaseLineInput[] = filled.map((r) => ({ itemId: r.itemId, quantity: Number(r.quantity), rate: Number(r.rate) || 0, gstPct: 0 }));
-    setBusy(true);
-    try {
-      const po = await createPurchase({ supplier, lines, expectedDate: expected, notes });
-      onSaved(po);
-      onClose();
-    } catch (e: any) {
-      setError(e?.message || 'The order could not be saved.');
-    } finally {
-      setBusy(false);
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      return setError('No internet connection — nothing was saved. Please try again.');
     }
+    const lines: PurchaseLineInput[] = filled.map((r) => ({ itemId: r.itemId, quantity: Number(r.quantity), rate: Number(r.rate) || 0, gstPct: 0 }));
+    setBusy(false);
+    showActionToast('Saving…', `PO for ${supplier.name.trim()}`, 'saving');
+    onClose();
+    createPurchase({ supplier, lines, expectedDate: expected, notes })
+      .then((po) => {
+        showActionToast(`${po.poNumber} created`, `${po.lines.length} item(s) ordered from ${po.supplier.name}`, 'success');
+      })
+      .catch((e: any) => {
+        showActionToast('Could not save PO', e?.message || 'The order could not be saved.', 'error');
+      });
   };
 
   return (
@@ -679,8 +1244,8 @@ const NewPurchaseSheet: React.FC<{ lowStock: boolean; onClose: () => void; onSav
 // ---------------------------------------------------------------------------
 // Receive goods
 // ---------------------------------------------------------------------------
-const ReceiveSheet: React.FC<{ po: Purchase; showPrices: boolean; onClose: () => void; onSaved: () => void }> = ({ po, showPrices, onClose, onSaved }) => {
-  const { items } = useInventory();
+const ReceiveSheet: React.FC<{ po: Purchase; showPrices: boolean; onClose: () => void; onSaved: () => void }> = ({ po, showPrices, onClose }) => {
+  const { items, showActionToast } = useInventory();
   const { receivePurchase } = useTrade();
   const [qty, setQty] = useState<Record<string, string>>(() => {
     const init: Record<string, string> = {};
@@ -711,16 +1276,19 @@ const ReceiveSheet: React.FC<{ po: Purchase; showPrices: boolean; onClose: () =>
     if (anyOver) return setError('You can’t receive more than what is still pending on the order.');
     const input = lines.filter((x) => x.n > 0).map((x) => ({ itemId: x.l.itemId, quantity: x.n }));
     if (!input.length) return setError('Enter a received quantity for at least one item.');
-    setBusy(true);
-    try {
-      await receivePurchase(po.id, { lines: input, billNumber, billDate });
-      onSaved();
-      onClose();
-    } catch (e: any) {
-      setError(e?.message || 'Could not receive the goods.');
-    } finally {
-      setBusy(false);
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      return setError('No internet connection — nothing was saved. Please try again.');
     }
+    setBusy(false);
+    showActionToast('Saving…', `Receiving ${po.poNumber}`, 'saving');
+    onClose();
+    receivePurchase(po.id, { lines: input, billNumber, billDate })
+      .then(() => {
+        showActionToast('Goods received', 'Stock updated.', 'success');
+      })
+      .catch((e: any) => {
+        showActionToast('Could not receive goods', e?.message || 'Could not receive the goods.', 'error');
+      });
   };
 
   return (
@@ -811,8 +1379,8 @@ const ReceiveSheet: React.FC<{ po: Purchase; showPrices: boolean; onClose: () =>
 // ---------------------------------------------------------------------------
 const P_REASONS = ['Damaged', 'Wrong item', 'Poor quality', 'Excess quantity', 'Other'];
 
-const PurchaseReturnSheet: React.FC<{ po: Purchase; showPrices: boolean; onClose: () => void; onSaved: (r: PurchaseReturn) => void }> = ({ po, showPrices, onClose, onSaved }) => {
-  const { items } = useInventory();
+const PurchaseReturnSheet: React.FC<{ po: Purchase; showPrices: boolean; onClose: () => void; onSaved: (r: PurchaseReturn) => void }> = ({ po, showPrices, onClose }) => {
+  const { items, showActionToast } = useInventory();
   const { createPurchaseReturn } = useTrade();
   const [qty, setQty] = useState<Record<string, string>>({});
   const [reason, setReason] = useState(P_REASONS[0]);
@@ -843,16 +1411,19 @@ const PurchaseReturnSheet: React.FC<{ po: Purchase; showPrices: boolean; onClose
     if (anyOver) return setError('A return quantity is more than allowed.');
     const input = lines.filter((x) => x.n > 0).map((x) => ({ itemId: x.l.itemId, quantity: x.n }));
     if (!input.length) return setError('Enter a return quantity for at least one item.');
-    setBusy(true);
-    try {
-      const r = await createPurchaseReturn(po.id, { lines: input, reason, vehicleNumber: vehicle, date, notes });
-      onSaved(r);
-      onClose();
-    } catch (e: any) {
-      setError(e?.message || 'The return could not be saved.');
-    } finally {
-      setBusy(false);
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      return setError('No internet connection — nothing was saved. Please try again.');
     }
+    setBusy(false);
+    showActionToast('Saving…', `Return for ${po.poNumber}`, 'saving');
+    onClose();
+    createPurchaseReturn(po.id, { lines: input, reason, vehicleNumber: vehicle, date, notes })
+      .then((r) => {
+        showActionToast(`Return ${r.returnNumber} saved`, showPrices ? `Debit note ${formatINR(r.total)}` : 'Stock updated.', 'success');
+      })
+      .catch((e: any) => {
+        showActionToast('Could not save return', e?.message || 'The return could not be saved.', 'error');
+      });
   };
 
   return (
@@ -965,8 +1536,8 @@ const EditPurchaseReturnSheet: React.FC<{
   showPrices: boolean;
   onClose: () => void;
   onSaved: (r: PurchaseReturn) => void;
-}> = ({ r, po, showPrices, onClose, onSaved }) => {
-  const { items } = useInventory();
+}> = ({ r, po, showPrices, onClose }) => {
+  const { items, showActionToast } = useInventory();
   const { editPurchaseReturn } = useTrade();
   const [qty, setQty] = useState<Record<string, string>>(() =>
     r.lines.reduce((acc, l) => ({ ...acc, [l.itemId]: String(l.quantity) }), {})
@@ -1013,16 +1584,19 @@ const EditPurchaseReturnSheet: React.FC<{
     if (anyOver) return setError('A return quantity is more than allowed.');
     const input = lines.filter((x) => x.n > 0).map((x) => ({ itemId: x.l.itemId, quantity: x.n }));
     if (!input.length) return setError('Enter a return quantity for at least one item.');
-    setBusy(true);
-    try {
-      const updated = await editPurchaseReturn(r.id, { lines: input, reason, vehicleNumber: vehicle, date, notes });
-      onSaved(updated);
-      onClose();
-    } catch (e: any) {
-      setError(e?.message || 'The return could not be updated.');
-    } finally {
-      setBusy(false);
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      return setError('No internet connection — nothing was saved. Please try again.');
     }
+    setBusy(false);
+    showActionToast('Saving…', `Updating ${r.returnNumber}`, 'saving');
+    onClose();
+    editPurchaseReturn(r.id, { lines: input, reason, vehicleNumber: vehicle, date, notes })
+      .then((updated) => {
+        showActionToast(`Return ${updated.returnNumber} updated`, showPrices ? `Debit note ${formatINR(updated.total)}.` : 'Stock updated.', 'success');
+      })
+      .catch((e: any) => {
+        showActionToast('Could not update return', e?.message || 'The return could not be updated.', 'error');
+      });
   };
 
   return (
@@ -1212,8 +1786,8 @@ const PurchaseDetailSheet: React.FC<{ po: Purchase; showPrices: boolean; returns
 // ---------------------------------------------------------------------------
 // Edit Purchase Order
 // ---------------------------------------------------------------------------
-const EditPurchaseSheet: React.FC<{ po: Purchase; onClose: () => void; onSaved: (p: Purchase) => void }> = ({ po, onClose, onSaved }) => {
-  const { items } = useInventory();
+const EditPurchaseSheet: React.FC<{ po: Purchase; onClose: () => void; onSaved: (p: Purchase) => void }> = ({ po, onClose }) => {
+  const { items, showActionToast } = useInventory();
   const { suppliers, editPurchase } = useTrade();
 
   const [supplier, setSupplier] = useState<PartyInfo>(() => ({
@@ -1256,22 +1830,25 @@ const EditPurchaseSheet: React.FC<{ po: Purchase; onClose: () => void; onSaved: 
     const filled = rows.filter((r) => r.itemId);
     if (!filled.length) return setError('Add at least one item.');
     if (filled.some((r) => !(Number(r.quantity) > 0))) return setError('Enter a quantity on every item row.');
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      return setError('No internet connection — nothing was saved. Please try again.');
+    }
     const lines: PurchaseLineInput[] = filled.map((r) => ({
       itemId: r.itemId,
       quantity: Number(r.quantity),
       rate: Number(r.rate) || 0,
       gstPct: 0,
     }));
-    setBusy(true);
-    try {
-      const updated = await editPurchase(po.id, { supplier, lines, expectedDate: expected, notes });
-      onSaved(updated);
-      onClose();
-    } catch (e: any) {
-      setError(e?.message || 'The purchase order could not be updated.');
-    } finally {
-      setBusy(false);
-    }
+    setBusy(false);
+    showActionToast('Saving…', `Updating ${po.poNumber}`, 'saving');
+    onClose();
+    editPurchase(po.id, { supplier, lines, expectedDate: expected, notes })
+      .then((updated) => {
+        showActionToast(`PO ${updated.poNumber} updated`, 'Changes saved.', 'success');
+      })
+      .catch((e: any) => {
+        showActionToast('Could not update PO', e?.message || 'The purchase order could not be updated.', 'error');
+      });
   };
 
   return (

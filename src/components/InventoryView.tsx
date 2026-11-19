@@ -14,13 +14,16 @@ import {
   CheckCircle2,
   AlertCircle,
   Download,
+  Upload,
   RefreshCw,
+  Camera,
 } from 'lucide-react';
 import { InventoryItem, ItemType } from '../types/inventory';
 import { useInventory } from '../context/InventoryContext';
 import { useAuth } from '../context/AuthContext';
 import { ProductDetailHistoryView } from './ProductDetailHistoryView';
 import { downloadExcelFile } from '../utils/fileDownload';
+import { formatQty } from '../utils/numberFormat';
 
 export type CategoryOption = 'raw_material' | 'finished_good' | 'semi_finished' | 'no_stock' | 'all';
 
@@ -47,6 +50,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
 
   // Search and Sort State
   const [search, setSearch] = useState('');
+  const [homeSearch, setHomeSearch] = useState('');
   const [sortBy, setSortBy] = useState<SortField>(() => {
     try {
       const saved = localStorage.getItem('powertrack_inventory_sort_by');
@@ -169,7 +173,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     raw_material: {
       title: 'Raw Material',
       singular: 'Raw Material',
-      subtitle: 'Base components, parts & batch ingredients',
+      subtitle: 'Base components, plates & raw materials',
       icon: Layers,
       color: 'text-amber-800',
       badgeColor: 'bg-amber-100/90 text-amber-900 border-amber-300',
@@ -316,7 +320,19 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     () => items.filter((i) => i.quantity <= 0).length,
     [items]
   );
-  const allCount = items.length;
+
+  // Home global search across all categories
+  const homeSearchResults = useMemo(() => {
+    const query = homeSearch.trim().toLowerCase();
+    if (!query) return [];
+    const matched = items.filter(
+      (item) =>
+        item.name.toLowerCase().includes(query) ||
+        item.sku.toLowerCase().includes(query) ||
+        (item.supplier && item.supplier.toLowerCase().includes(query))
+    );
+    return sortItems(matched);
+  }, [items, homeSearch, sortItems]);
 
   const [itemToDelete, setItemToDelete] = useState<{ id: string; name: string } | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -397,12 +413,19 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     );
   };
 
-  // Reusable Phone-Optimized Compact Product Card
-  const renderProductCard = (item: InventoryItem) => {
+  // Reusable Phone-Optimized Compact Product Card with 64x64 thumbnail
+  const renderProductCard = (item: InventoryItem, useGreyCategoryLabel = false) => {
     const isLow = item.quantity <= item.minStock;
     const isOut = item.quantity <= 0;
     const isRaw = item.type === 'raw_material';
     const canOpen = permissions.canOpenProductDetail;
+    const categoryLabel = isRaw
+      ? 'Raw Material'
+      : item.type === 'semi_finished'
+      ? 'Semi-Finished'
+      : item.type === 'both'
+      ? 'Composite'
+      : 'Finished Goods';
 
     return (
       <div
@@ -412,78 +435,98 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
             handleOpenHistory(item);
           }
         }}
-        className={`bg-white rounded-xl border border-slate-200/90 p-2 sm:p-2.5 shadow-2xs transition flex flex-col justify-between gap-1 ${
+        className={`bg-white rounded-xl border border-slate-200/90 p-2 sm:p-2.5 shadow-2xs transition flex items-center gap-3 ${
           canOpen
             ? 'hover:border-indigo-300 hover:shadow-xs cursor-pointer group active:bg-slate-50'
             : 'cursor-default'
         }`}
         title={canOpen ? 'Tap to open product details' : undefined}
       >
-        {/* Top Bar: Item Title + SKU + Chevron */}
-        <div className="flex items-start justify-between gap-2">
-          <div className="min-w-0 flex-1">
-            <h4
-              className={`font-bold text-xs sm:text-[13px] text-slate-900 transition leading-snug break-words ${
-                canOpen ? 'group-hover:text-indigo-600' : ''
-              }`}
-            >
-              {item.name}
-            </h4>
-            {item.sku && (
-              <span className="font-mono text-[9px] text-slate-400 bg-slate-50 px-1 py-0.2 rounded border border-slate-100 inline-block mt-0.5">
-                SKU: {item.sku}
-              </span>
-            )}
-          </div>
-          {canOpen && (
-            <ChevronRight className="w-3.5 h-3.5 text-slate-300 group-hover:text-indigo-500 shrink-0 mt-0.5" />
+        {/* 64x64 rounded thumbnail on the left */}
+        <div className="w-16 h-16 rounded-xl overflow-hidden shrink-0 border border-slate-200 bg-slate-100 flex flex-col items-center justify-center text-slate-400">
+          {item.photoThumb ? (
+            <img
+              src={item.photoThumb}
+              alt={item.name}
+              className="w-full h-full object-cover"
+              loading="lazy"
+            />
+          ) : (
+            <div className="flex flex-col items-center justify-center text-center p-1">
+              <Camera className="w-4 h-4 text-slate-400" />
+              <span className="text-[9px] font-medium text-slate-400 mt-0.5 leading-none">No photo</span>
+            </div>
           )}
         </div>
 
-        {/* Bottom Row: Classification Tag on Left & Stock Quantity on Right */}
-        <div className="flex items-center justify-between gap-2 pt-1 border-t border-slate-100">
-          <span
-            className={`text-[9px] font-bold px-1.5 py-0.2 rounded-md shrink-0 border ${
-              isRaw
-                ? 'bg-amber-50 text-amber-800 border-amber-200'
-                : item.type === 'semi_finished'
-                ? 'bg-purple-50 text-purple-800 border-purple-200'
-                : item.type === 'both'
-                ? 'bg-blue-50 text-blue-800 border-blue-200'
-                : 'bg-indigo-50 text-indigo-800 border-indigo-200'
-            }`}
-          >
-            {isRaw
-              ? 'Raw Material'
-              : item.type === 'semi_finished'
-              ? 'Semi-Finished'
-              : item.type === 'both'
-              ? 'Composite'
-              : 'Finished Goods'}
-          </span>
-
-          <div className="flex items-baseline gap-1 shrink-0">
-            <span
-              className={`text-sm sm:text-base font-black font-mono ${
-                isOut
-                  ? 'text-rose-600'
-                  : isLow
-                  ? 'text-amber-600'
-                  : 'text-slate-900'
-              }`}
-            >
-              {item.quantity.toFixed(1)}
-            </span>
-            <span className="text-[10px] font-medium text-slate-500">{item.unit}</span>
-            <span className="text-[9px] font-bold ml-0.5">
-              {isOut ? (
-                <span className="text-rose-600 uppercase">No Stock</span>
-              ) : isLow ? (
-                <span className="text-amber-600 uppercase">Low</span>
-              ) : (
-                <span className="text-emerald-700">In Stock</span>
+        {/* Right Details Column */}
+        <div className="min-w-0 flex-1 flex flex-col justify-between self-stretch py-0.5">
+          {/* Top Bar: Item Title + SKU + Chevron */}
+          <div className="flex items-start justify-between gap-1.5">
+            <div className="min-w-0 flex-1">
+              <h4
+                className={`font-bold text-xs sm:text-[13px] text-slate-900 transition leading-snug break-words line-clamp-1 ${
+                  canOpen ? 'group-hover:text-indigo-600' : ''
+                }`}
+              >
+                {item.name}
+              </h4>
+              {item.sku && (
+                <span className="font-mono text-[9px] text-slate-400 bg-slate-50 px-1 py-0.2 rounded border border-slate-100 inline-block mt-0.5">
+                  SKU: {item.sku}
+                </span>
               )}
-            </span>
+            </div>
+            {canOpen && (
+              <ChevronRight className="w-3.5 h-3.5 text-slate-300 group-hover:text-indigo-500 shrink-0 mt-0.5" />
+            )}
+          </div>
+
+          {/* Bottom Row: Classification Tag on Left & Stock Quantity on Right */}
+          <div className="flex items-center justify-between gap-2 pt-1 mt-1 border-t border-slate-100">
+            {useGreyCategoryLabel ? (
+              <span className="text-[10px] font-medium text-slate-500 shrink-0 truncate">
+                {categoryLabel}
+              </span>
+            ) : (
+              <span
+                className={`text-[9px] font-bold px-1.5 py-0.2 rounded-md shrink-0 border ${
+                  isRaw
+                    ? 'bg-amber-50 text-amber-800 border-amber-200'
+                    : item.type === 'semi_finished'
+                    ? 'bg-purple-50 text-purple-800 border-purple-200'
+                    : item.type === 'both'
+                    ? 'bg-blue-50 text-blue-800 border-blue-200'
+                    : 'bg-indigo-50 text-indigo-800 border-indigo-200'
+                }`}
+              >
+                {categoryLabel}
+              </span>
+            )}
+
+            <div className="flex items-baseline gap-1 shrink-0">
+              <span
+                className={`text-sm sm:text-base font-black font-mono ${
+                  isOut
+                    ? 'text-rose-600'
+                    : isLow
+                    ? 'text-amber-600'
+                    : 'text-slate-900'
+                }`}
+              >
+                {formatQty(item.quantity, item.unit)}
+              </span>
+              <span className="text-[10px] font-medium text-slate-500">{item.unit}</span>
+              <span className="text-[9px] font-bold ml-0.5">
+                {isOut ? (
+                  <span className="text-rose-600 uppercase">No Stock</span>
+                ) : isLow ? (
+                  <span className="text-amber-600 uppercase">Low</span>
+                ) : (
+                  <span className="text-emerald-700">In Stock</span>
+                )}
+              </span>
+            </div>
           </div>
         </div>
       </div>
@@ -572,10 +615,10 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
           <button
             type="button"
             onClick={handleCloseCategory}
-            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold text-indigo-700 bg-indigo-50/70 hover:bg-indigo-100 border border-indigo-200 transition cursor-pointer active:scale-95"
+            className="inline-flex items-center gap-1.5 text-xs sm:text-sm font-semibold text-slate-600 hover:text-indigo-600 transition cursor-pointer py-1 whitespace-nowrap shrink-0"
           >
             <ArrowLeft className="w-4 h-4" />
-            <span>← Back to Master Menu</span>
+            <span>Inventory</span>
           </button>
 
           <div className="flex items-center gap-2">
@@ -615,7 +658,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                 {activeConf.title}
               </h1>
               <span className={`text-[11px] font-extrabold px-2 py-0.5 rounded-full border ${activeConf.badgeColor}`}>
-                {categoryItems.length} Products
+                {categoryItems.length} {categoryItems.length === 1 ? 'item' : 'items'}
               </span>
             </div>
           </div>
@@ -624,20 +667,20 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
         {/* Search and Sort Bar */}
         <div className="p-2 bg-white rounded-xl border border-slate-200 flex items-center gap-2 shadow-2xs">
           <div className="relative flex-1 min-w-0">
-            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
             <input
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder={`Search in ${activeConf.title}...`}
-              className="w-full pl-8 pr-2 py-1.5 text-xs rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 placeholder:text-slate-400"
+              placeholder="Search items"
+              className="w-full h-[38px] pl-8 pr-2 text-sm rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 placeholder:text-slate-400"
             />
           </div>
 
           <select
             value={sortBy}
             onChange={(e) => setSortBy(e.target.value as any)}
-            className="text-xs px-2 py-1.5 rounded-lg border border-slate-200 bg-white font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 shrink-0 max-w-[130px] sm:max-w-none"
+            className="h-[38px] text-sm px-2.5 rounded-lg border border-slate-200 bg-white font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 shrink-0 max-w-[130px] sm:max-w-none"
           >
             <option value="name">Sort: Name</option>
             <option value="classification">Sort: Class</option>
@@ -650,13 +693,13 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
             type="button"
             onClick={() => setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')}
             title="Toggle sort order"
-            className="p-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-600 transition cursor-pointer shrink-0"
+            className="h-[38px] w-[38px] flex items-center justify-center rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-600 transition cursor-pointer shrink-0"
           >
             <ArrowUpDown className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Products Grid */}
+        {/* Items Grid */}
         {categoryItems.length === 0 ? (
           <div className="bg-white rounded-2xl border border-slate-200 p-8 sm:p-12 text-center space-y-3 shadow-2xs">
             <div className={`w-12 h-12 rounded-2xl flex items-center justify-center mx-auto ${activeConf.badgeColor}`}>
@@ -666,8 +709,8 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
               {search.trim()
                 ? `No matching items in ${activeConf.title}`
                 : activeCategoryPage === 'no_stock'
-                ? 'All Products Are In Stock! 🎉'
-                : `No products in ${activeConf.title}`}
+                ? 'All Items Are In Stock! 🎉'
+                : `No items in ${activeConf.title}`}
             </h3>
             <p className="text-xs text-slate-500 max-w-sm mx-auto">
               {search.trim()
@@ -689,7 +732,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-1.5 sm:gap-2">
-            {categoryItems.map(renderProductCard)}
+            {categoryItems.map((item) => renderProductCard(item))}
           </div>
         )}
       </div>
@@ -764,17 +807,17 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                   </h3>
                   <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-xs text-amber-900 space-y-1.5">
                     <p className="font-semibold">
-                      &quot;{itemToDelete.name}&quot; is used in {blockingRecipes.length} recipe{blockingRecipes.length > 1 ? 's' : ''}:
+                      &quot;{itemToDelete.name}&quot; is used in {blockingRecipes.length} BOM{blockingRecipes.length > 1 ? 's' : ''}:
                     </p>
                     <ul className="list-disc pl-4 space-y-0.5 text-amber-800">
                       {blockingRecipes.map((r) => (
                         <li key={r.id} className="font-medium">
-                          {r.name} {r.finishedItemId === itemToDelete.id ? '(Output Product)' : '(Ingredient)'}
+                          {r.name} {r.finishedItemId === itemToDelete.id ? '(Output Product)' : '(Material)'}
                         </li>
                       ))}
                     </ul>
                     <p className="text-[11px] text-amber-700 pt-1">
-                      Please remove or update this item in those recipes before deleting it.
+                      Please remove or update this item in those BOMs before deleting it.
                     </p>
                   </div>
                 </div>
@@ -818,86 +861,118 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
         </div>
       )}
 
-      {/* Top Header & Action Controls */}
-      <div className="flex items-center justify-between gap-3 flex-wrap">
-        <div>
-          <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
-            Inventory & Stock Master
-          </h1>
-        </div>
+      {/* Desktop Page Title (hidden on mobile) */}
+      <h1 className="hidden sm:block text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
+        Inventory & Stock Master
+      </h1>
 
-        <div className="flex items-center gap-2">
-          {permissions.canExportExcel && (
+      {/* 1. TOP ROW: Search all items + square Export & Import icon buttons */}
+      <div className="flex items-center gap-2">
+        <div className="flex-1 min-w-0 flex items-center gap-2 px-3 h-[38px] rounded-xl bg-white border border-slate-200 shadow-2xs focus-within:ring-2 focus-within:ring-indigo-500">
+          <Search className="w-4 h-4 text-slate-400 shrink-0" />
+          <input
+            type="text"
+            value={homeSearch}
+            onChange={(e) => setHomeSearch(e.target.value)}
+            placeholder={`Search all ${items.length} items…`}
+            className="flex-1 min-w-0 bg-transparent text-xs outline-none text-slate-900 placeholder:text-slate-400"
+          />
+          {homeSearch && (
             <button
               type="button"
-              onClick={() => exportInventoryExcel(items, 'all')}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-emerald-50 border border-emerald-300 text-emerald-800 hover:bg-emerald-100 transition shadow-2xs cursor-pointer active:scale-95"
-              title="Download full inventory to Excel (.xlsx)"
+              onClick={() => setHomeSearch('')}
+              aria-label="Clear search"
+              className="text-slate-400 hover:text-slate-700 cursor-pointer shrink-0"
             >
-              <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
-              <span>Export Excel</span>
-            </button>
-          )}
-
-          {permissions.canEditItems && (
-            <button
-              onClick={onOpenExcelImport}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 transition shadow-2xs cursor-pointer active:scale-95"
-              title="Bulk import products from Excel (.xlsx) or CSV"
-            >
-              <FileSpreadsheet className="w-3.5 h-3.5 text-indigo-600" />
-              <span>Import Excel</span>
+              <X className="w-3.5 h-3.5" />
             </button>
           )}
         </div>
+
+        {permissions.canExportExcel && (
+          <button
+            type="button"
+            onClick={() => exportInventoryExcel(items, 'all')}
+            title="Export Excel"
+            aria-label="Export Excel"
+            className="w-[38px] h-[38px] rounded-xl flex items-center justify-center bg-emerald-50 border border-emerald-300 text-emerald-700 hover:bg-emerald-100 transition shadow-2xs cursor-pointer active:scale-95 shrink-0"
+          >
+            <Download className="w-4 h-4" />
+          </button>
+        )}
+
+        {permissions.canEditItems && (
+          <button
+            type="button"
+            onClick={onOpenExcelImport}
+            title="Import Excel"
+            aria-label="Import Excel"
+            className="w-[38px] h-[38px] rounded-xl flex items-center justify-center bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 transition shadow-2xs cursor-pointer active:scale-95 shrink-0"
+          >
+            <Upload className="w-4 h-4" />
+          </button>
+        )}
       </div>
 
-      {/* 
-        THE 4 CATEGORY CARDS (Tap to Open Dedicated Page):
-        1. Raw material
-        2. Finished goods
-        3. Semi-finished
-        4. Non-stock
-      */}
-      <div className="space-y-3 pt-1">
-        {primaryCategories.map(({ key, count }) => {
-          const conf = categoryConfig[key];
-          const CategoryIcon = conf.icon;
+      {/* 2. SEARCH RESULTS ACROSS ALL CATEGORIES OR 4 CATEGORY CARDS */}
+      {homeSearch.trim() ? (
+        <div className="space-y-2.5">
+          <div className="text-xs font-semibold text-slate-500">
+            {homeSearchResults.length} {homeSearchResults.length === 1 ? 'result' : 'results'}
+          </div>
 
-          return (
-            <div
-              key={key}
-              onClick={() => handleOpenCategory(key)}
-              className={`p-4 bg-white rounded-2xl border ${conf.borderColor} shadow-2xs hover:shadow-md transition cursor-pointer flex items-center justify-between gap-3 group active:scale-[0.99]`}
-            >
-              <div className="flex items-center gap-3.5 min-w-0">
-                <div
-                  className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0 border ${conf.badgeColor}`}
-                >
-                  <CategoryIcon className="w-5 h-5" />
-                </div>
-                <div className="min-w-0">
-                  <h2 className="text-base sm:text-lg font-bold text-slate-900 group-hover:text-indigo-600 transition truncate">
-                    {conf.title}
-                  </h2>
-                  <div className="mt-0.5">
-                    <span
-                      className={`text-xs font-bold px-2.5 py-0.5 rounded-full border ${conf.badgeColor}`}
-                    >
-                      {count} items
-                    </span>
+          {homeSearchResults.length === 0 ? (
+            <div className="py-10 text-center text-xs font-medium text-slate-500">
+              No items match &lsquo;{homeSearch.trim()}&rsquo;
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-1.5 sm:gap-2">
+              {homeSearchResults.map((item) => renderProductCard(item, true))}
+            </div>
+          )}
+        </div>
+      ) : (
+        /* 3. THE 4 CATEGORY CARDS (Tap to Open Dedicated Page) */
+        <div className="space-y-3 pt-1">
+          {primaryCategories.map(({ key, count }) => {
+            const conf = categoryConfig[key];
+            const CategoryIcon = conf.icon;
+
+            return (
+              <div
+                key={key}
+                onClick={() => handleOpenCategory(key)}
+                className={`p-4 bg-white rounded-2xl border ${conf.borderColor} shadow-2xs hover:shadow-md transition cursor-pointer flex items-center justify-between gap-3 group active:scale-[0.99]`}
+              >
+                <div className="flex items-center gap-3.5 min-w-0">
+                  <div
+                    className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0 border ${conf.badgeColor}`}
+                  >
+                    <CategoryIcon className="w-5 h-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <h2 className="text-base sm:text-lg font-bold text-slate-900 group-hover:text-indigo-600 transition truncate">
+                      {conf.title}
+                    </h2>
+                    <div className="mt-0.5">
+                      <span
+                        className={`text-xs font-bold px-2.5 py-0.5 rounded-full border ${conf.badgeColor}`}
+                      >
+                        {count} items
+                      </span>
+                    </div>
                   </div>
                 </div>
-              </div>
 
-              {/* Single clean right arrow button */}
-              <div className="w-9 h-9 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-center text-slate-400 group-hover:text-indigo-600 group-hover:bg-indigo-50 group-hover:border-indigo-200 transition shrink-0">
-                <ChevronRight className="w-4 h-4" />
+                {/* Single clean right arrow button */}
+                <div className="w-9 h-9 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-center text-slate-400 group-hover:text-indigo-600 group-hover:bg-indigo-50 group-hover:border-indigo-200 transition shrink-0">
+                  <ChevronRight className="w-4 h-4" />
+                </div>
               </div>
-            </div>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 };
